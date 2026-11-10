@@ -4,7 +4,7 @@
 
 This document defines how the platform authenticates users, authorizes actions, and resists the abuses that a video site attracts. It does not claim these controls have been built or tested.
 
-Canonical decisions: ADR-003, ADR-004, ADR-005, ADR-011, ADR-012, ADR-013, ADR-022, ADR-023, ADR-025.
+Canonical decisions: ADR-003, ADR-004, ADR-005, ADR-011, ADR-012, ADR-013, ADR-022, ADR-023, ADR-025, ADR-031, ADR-032.
 
 ## 1. Trust boundaries
 
@@ -15,7 +15,8 @@ Canonical decisions: ADR-003, ADR-004, ADR-005, ADR-011, ADR-012, ADR-013, ADR-0
 | FastAPI | Trusted to enforce identity, ACL, quota, and roles |
 | Worker | Trusted with object-storage credentials and FFmpeg. Not reachable from the network |
 | PostgreSQL, Redis, MinIO | Private Docker network only. No published ports |
-| MinIO credentials | API and worker environment only. Never in the frontend bundle, never in presigned URLs as raw keys, never in logs |
+| MinIO application credentials | API and worker environment only. Never in the frontend bundle, never in presigned URLs as raw keys, never in logs |
+| MinIO root credentials | MinIO server process and the one-shot init container only. The API refuses to start if it sees them |
 
 Presigned URLs are capabilities. They are created only after the API has authorized the action, they are scoped to one object and one method, and they expire quickly.
 
@@ -158,7 +159,12 @@ Validation is layered. Any single layer can be bypassed by a crafted client, so 
 | Concurrency | Initiate | Cap active sessions per user |
 | Rate limit | Initiate | 10 per hour per user, 30 per hour per IP |
 | Part scope | Presign | Only part numbers that belong to this session, batch size ≤ 20 |
-| Completion check | Complete | Object exists, size within 1 percent of the declaration, non-zero |
+| Part numbers | Presign and complete | Integers, unique, only `1 .. part_count`, batch ≤ 20, and `part_count` ≤ 512 |
+| Part length | Presign | SigV4 signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder. MinIO rejects any other length |
+| Stored parts | Complete | `ListParts` must be exactly those part numbers and sizes. Client ETags must match. Sum must equal `expected_size` with no tolerance |
+| Object size | Complete | `HEAD` `Content-Length` must equal `expected_size` |
+| Duplicate and concurrent complete | Complete | A finished session returns the current video. A second in-flight caller receives `409 UPLOAD_IN_PROGRESS` |
+| Expiry and abandon | Sweeper and lifecycle | API refuses expired sessions. Sweeper aborts them. MinIO lifecycle aborts incomplete multipart uploads after 1 day |
 | Media probe | Worker | Real container, at least one video stream, duration and dimension caps |
 | FFmpeg sandbox | Worker | Non-root user, `-protocol_whitelist file,pipe`, `-nostdin`, process-group timeout, no network needed |
 | Thumbnail and avatar | API | Size cap, decode with Pillow, dimension cap, re-encode to JPEG, metadata stripped |
@@ -169,9 +175,130 @@ A polyglot file that is a valid video and also contains another payload is store
 
 Image uploads are re-encoded so the stored thumbnail is not the original file. This removes EXIF and most content smuggled past a MIME check (ADR-023).
 
-Quota and reservation details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md) and ADR-025.
+Quota and reservation details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md) and ADR-025. The split between API checks and MinIO checks is in that document, section 3.7. The rule that matters here: a presigned part URL cannot store more bytes than the length in its signature, and that length was reserved against the user quota before the URL existed.
 
-## 5. Rate limiting
+## 5. Object storage
+
+MinIO is private infrastructure. The browser talks to the public S3 hostname only with URLs the API has just signed. Administrative credentials never reach the browser, the OpenAPI examples, or the API process.
+
+### 5.1 Network
+
+| Path | Exposure |
+| --- | --- |
+| `minio:9000` | Docker network only. Compose does not publish 9000 or 9001 |
+| MinIO console | Disabled with `MINIO_BROWSER=off` |
+| `https://s3.<domain>` | Caddy site that reverse-proxies to `minio:9000` and preserves `Host` |
+| API and worker | Use `MINIO_ENDPOINT=http://minio:9000` for `ListParts`, `HEAD`, complete, abort, and server-side reads. They do not use the public URL for those calls |
+
+Startup of the API process checks three things and exits if any fail: the bucket exists, the bucket policy matches the document in section 5.2, and `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` are absent from the API environment. Readiness uses the application credentials to confirm the bucket is reachable. It does not use root credentials.
+
+### 5.2 Bucket policy
+
+The init container applies this policy to bucket `media`. There is no statement whose principal is `*`, and there is no `s3:*`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AppObjectAccess",
+      "Effect": "Allow",
+      "Principal": { "AWS": ["arn:aws:iam::minio:user/media-app"] },
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": ["arn:aws:s3:::media/*"]
+    },
+    {
+      "Sid": "AppBucketList",
+      "Effect": "Allow",
+      "Principal": { "AWS": ["arn:aws:iam::minio:user/media-app"] },
+      "Action": [
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": ["arn:aws:s3:::media"]
+    }
+  ]
+}
+```
+
+Anything else is denied, including anonymous `GetObject` and `PutObject`. The application never calls an anonymous or public-read setting. A policy fetch that contains `Principal` `*` or `Action` `s3:*` is a startup failure.
+
+A hard bucket quota, `MINIO_BUCKET_QUOTA_BYTES`, is set by the same init. It limits total disk use if an application bug signs a bad URL. It does not replace per-user reservations.
+
+Lifecycle: abort incomplete multipart uploads after 1 day. Objects are not expired by lifecycle. Deletion of a video's prefixes is the sweeper's job.
+
+### 5.3 CORS
+
+CORS is set on the bucket and answered by MinIO through the S3 host. One origin. Credentials are off. The browser does not send cookies to `s3.<domain>`.
+
+| Field | Value |
+| --- | --- |
+| Allowed origin | `PUBLIC_APP_URL` only. No `*` |
+| Allowed methods | `GET`, `PUT`, `HEAD` |
+| Allowed headers | `Content-Type`, `Content-Length`, `x-amz-*` |
+| Expose headers | `ETag` |
+| Max age | 300 seconds |
+
+`ETag` is exposed so the browser can read the part ETag after `PUT` and send it to complete. The API still treats `ListParts` as the authority and only uses the client ETag as a match check. No other response header is exposed. `DELETE`, `POST`, and `*` methods are not allowed. A second origin is not added for convenience.
+
+### 5.4 Presigned URL lifetime
+
+| URL | Method | Lifetime | Bound to |
+| --- | --- | --- | --- |
+| Upload part | `PUT` | 20 minutes | Key, upload id, part number, `Content-Length` |
+| Segment after an authorized segment request | `GET` | `PLAYBACK_SEGMENT_TTL_SECONDS` (120) | One object key |
+| Thumbnail embedded in JSON | `GET` | 120 seconds | One thumbnail key |
+
+All three use SigV4 and `S3_PUBLIC_BASE_URL`. None of them are prefix wildcards. Upload URLs are not valid as `GET`. Segment URLs are not valid as `PUT`.
+
+### 5.5 Hostname
+
+TLS mode requires all of these to agree, and `ubuntu-up.sh` refuses to start if they do not:
+
+- `PUBLIC_DOMAIN=example.com`
+- `PUBLIC_APP_URL=https://example.com`
+- `S3_PUBLIC_BASE_URL=https://s3.example.com`
+- `CORS_ORIGINS=https://example.com`
+- Caddy site label `s3.example.com`
+- `MINIO_DOMAIN=s3.example.com`
+
+Addressing is path-style: `https://s3.example.com/media/originals/{video_id}/source`. The presigner and Caddy must use that host so the signature matches the `Host` header MinIO sees. Demo HTTP mode uses `http://s3.localhost` only on a loopback deploy and prints that it is not a production configuration.
+
+### 5.6 Credentials
+
+| Secret | Who receives it |
+| --- | --- |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | `minio` service and `minio-init` only. Stored in `/opt/youtube-clone/.env.minio-root`, mode 600 |
+| `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | `media-app` user created by init. API and worker only. Stored in `.env`, mode 600 |
+
+Init creates `media-app` if it does not exist, attaches the policy above, and does not print the secret. Re-running init does not rotate the secret. The API, worker, edge, and frontend services do not use `env_file` for the root file. Their Compose `environment` lists the variables they are allowed to see. If root variables are present in the API process, the process exits before it listens.
+
+Rotation is an operator procedure: create a new access key, restart API and worker, then disable the old key. The first release does not rotate automatically.
+
+### 5.7 When MinIO is unavailable
+
+| Operation | Behavior |
+| --- | --- |
+| Initiate, after the reservation is committed, if `CreateMultipartUpload` fails | Release the reservation, mark the session `aborted`, return the video to `draft`, `503 STORAGE_UNAVAILABLE` |
+| Presign | Does not call MinIO. If the last readiness snapshot says MinIO is down, still return `503` so the client does not receive URLs that cannot be stored. The snapshot is the ready check's MinIO result, refreshed at least every 10 seconds |
+| Complete, network error before `CompleteMultipartUpload` | `503 STORAGE_UNAVAILABLE`. Session returns to `initiated`. No job is inserted |
+| Complete, network error after `CompleteMultipartUpload` was attempted | `HEAD` decides. A verified object is finalized. A missing object returns the session to `initiated`. If `HEAD` fails too, the session stays `completing` and a retry receives `409` until the lock window passes |
+| Complete, verification rejection | Abort as in the pipeline document. This is a client error, not an outage |
+| Playlist read | `503 STORAGE_UNAVAILABLE` |
+| Segment redirect | The ACL check does not need MinIO. Signing a URL does not either. If MinIO was down at the last probe, return `503` instead of a URL that will fail in the player |
+| Worker download or artifact upload | Retryable `storage_error` |
+| Readiness | `503` with `checks.minio=fail` |
+
+The API does not fall back to a public URL or skip the ACL when MinIO is down.
+
+## 6. Rate limiting
 
 Algorithm: sliding window in Redis, key prefix `rl:`. If Redis is unavailable, the API returns `503 SERVICE_UNAVAILABLE` for routes that require a limit. It does not fail open (ADR-022).
 
@@ -195,7 +322,7 @@ The HLS limit is high enough for a seek that pulls a burst of segments and for o
 
 Responses use `429` and `Retry-After`. The error code is `RATE_LIMITED`.
 
-## 6. Web vulnerabilities
+## 7. Web vulnerabilities
 
 | Risk | Control |
 | --- | --- |
@@ -212,13 +339,13 @@ Responses use `429` and `Retry-After`. The error code is `RATE_LIMITED`.
 | User enumeration | Login responses are generic. Registration conflict on email is accepted and rate limited. Grant lookup is by handle and is also rate limited with the general authenticated limit of 120 requests per minute per user |
 | Brute force | Login rate limits plus Argon2 cost |
 | Token theft via XSS | Access token is in memory. Refresh and playback cookies are `HttpOnly`. CSP reduces XSS impact. A successful XSS can still call the API as the user while the page is open; CSP and escaping are the preventive controls |
-| Replay of presigned upload | URLs expire in 20 minutes and are bound to the upload id. Complete checks the final size |
+| Replay of presigned upload | URLs expire in 20 minutes and are bound to the upload id, part number, and `Content-Length`. Complete compares `ListParts` with the declared size |
 | Path traversal | Object keys are built from UUIDs and a fixed suffix. User filenames and tag strings are never interpolated into keys |
 | Dependency and image risk | Images pinned by major version in Compose. The implementation stage pins digests or patch versions before the deployment stage is called done. Containers run as non-root |
 | Information leaks | 500 responses have no stack trace. Presigned URLs are not logged. 404 is used for hidden private existence |
 | Unrestricted file upload | Caps, allow-lists, quota, probe, and re-encode as above |
 | Denial of service | Upload caps, one transcode by default, FFmpeg timeout, request body limit of 2 MB on the API (thumbnails and avatars), JSON body limit 256 KB, rate limits |
-| CORS | Application API allows only `CORS_ORIGINS`, methods required by the API, and the `Authorization` header. `Access-Control-Allow-Credentials` is false on the API because auth uses a bearer header, not a cookie, except the same-origin refresh and HLS routes which do not need CORS. The S3 host allows the app origin for `GET`, `PUT`, `HEAD` and exposes `ETag` |
+| CORS | Application API allows only `CORS_ORIGINS`, the methods the API uses, and the `Authorization` header. Credentials are off on that CORS policy because mutations use a bearer token. Same-origin refresh and HLS routes do not need CORS. The S3 host uses the bucket CORS in section 5.3 |
 | TLS | Caddy obtains certificates when a public domain is set. Cookies are `Secure` in that mode. Demo HTTP mode is labeled insecure in the setup script output |
 | Security headers | `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` disabling camera and microphone, HSTS when TLS is on |
 | Secret handling | `.env` mode 600, not committed. `.env.example` contains keys and empty values only |
@@ -226,7 +353,7 @@ Responses use `429` and `Retry-After`. The error code is `RATE_LIMITED`.
 
 Authenticated request rate of 120 per minute per user is a backstop on top of the tighter limits above.
 
-## 7. Privacy notes
+## 8. Privacy notes
 
 - Emails are not shown on channel pages or in search.
 - IP addresses are not stored in the clear. Anonymous view dedupe stores a daily-salted SHA-256 of IP and user agent, and the row is deleted after 48 hours. The salt is in process memory and in a Redis key with a 48 hour TTL, not in PostgreSQL. Losing the salt early only under-counts views.
@@ -234,28 +361,75 @@ Authenticated request rate of 120 per minute per user is a backstop on top of th
 - Logs may contain user ids and video ids. They must not contain passwords, tokens, or presigned query strings.
 - Account deletion is not in the first release. Deactivation stops login and playback-session creation. Videos remain until an operator handles them. This is a known gap, not a silent omission.
 
-## 8. Security tests the implementation must include
+## 9. Security tests the implementation must include
 
-These are part of the definition of done for the security stage, not tests that exist now.
+These tests do not exist yet. Each row names the stage that must automate it. Stage 11 runs the whole list and fails if a row has no test. Authorization is asserted at the metadata route and, once playback exists, at the playlist and segment routes. A passing metadata test does not stand in for a segment test.
 
-- Private video metadata, comments, playback, and segment routes return 404 for a stranger, for a user with a revoked grant, and for an anonymous client.
-- An unlisted video is watchable with the id and absent from feed, search, related videos, and the public channel list.
-- A normal user receives 403 on every `/moderation` and `/admin` route.
-- A moderator receives 403 on role changes.
-- A client-supplied `role` on registration does not create a moderator.
-- A user cannot complete or presign another user's upload.
-- A presigned part URL is not issued for a video the caller does not own.
-- Logout increments epoch: the old access token is rejected, and the old refresh token is rejected.
-- Reuse of a rotated refresh token revokes the family.
-- A non-video payload that passes the content-type allow-list is marked `failed` with `invalid_media` and never becomes `ready`.
-- Hidden videos disappear from the feed and from anonymous playback.
-- The moderation audit trigger rejects `UPDATE` and `DELETE`.
-- Segment redirect `Location` host equals `S3_PUBLIC_BASE_URL` in a test that tries to force a different host through configuration of the video key. The key is server-built, so the test inspects the redirect of a normal segment and also a unit test of the host check.
+### 9.1 Private video access
 
-## 9. Residual risk
+Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, stranger S (authenticated, no grant), anonymous client A, moderator M. A second private video, N, has never been reported and is not hidden.
+
+| Test | Expected | Stage |
+| --- | --- | --- |
+| A `GET` metadata, comments, `POST` playback, `GET` master playlist, `GET` segment | 404 `VIDEO_NOT_FOUND` on every one | 3 for metadata and comments, 6 for playback, playlist, and segment |
+| S, same five calls | 404 on every one | 3 and 6 |
+| G metadata and comments | 200 | 3 |
+| G `POST` playback, then master and variant playlists with the session cookie | 200. Playlist bodies contain no `X-Amz-Algorithm` and no `X-Amz-Signature` | 6 |
+| G segment route | 302. `Location` host is `S3_PUBLIC_BASE_URL`. Path is that segment key only | 6 |
+| Owner revokes G. G repeats metadata, playlist, and segment, including the cookie from before the revoke | 404. The playback session row has `revoked_at` set | 3 and 6 |
+| Session `expires_at` set in the past. Playlist and segment with that cookie | 404 | 6 |
+| Session `revoked_at` set directly. Playlist and segment | 404 | 6 |
+| Cookie issued for this video is sent by the test client to a different video's segment route | 404. The session's `video_id` does not match the path | 6 |
+| Unsigned `GET` of `originals/{id}/source` and of an HLS segment key, no query string | 403 from MinIO | 6 |
+| Detail JSON and playlist body for G | Do not contain `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_ROOT_USER`, or `MINIO_ROOT_PASSWORD` | 6 |
+| API log lines captured during G's playback | Do not contain `X-Amz-Signature` or `X-Amz-Credential` | 6 |
+
+### 9.2 Moderation of private and hidden videos
+
+| Test | Expected | Stage |
+| --- | --- | --- |
+| M `POST /moderation/videos/{N}/playback` | 404. No `view_private_video` audit row | 10 |
+| S files a report on the private video. M playback | 200 and one `view_private_video` row | 10 |
+| M hides a public video. A feed, search, playback, and segment | Video absent. Playback and segment 404. One `hide_video` audit row | 10 |
+| Second hide | 200 and still one hide audit row | 10 |
+| Owner metadata while hidden | 200, `moderation_status=hidden` | 10 |
+| M restores. A can play again if the video is public. One `restore_video` row | 200 on anonymous playback | 10 |
+| S calls every `/moderation` and `/admin` route | 403 | 10 |
+| M calls the role-change route | 403 | 10 |
+
+### 9.3 Upload and bucket limits
+
+| Test | Expected | Stage |
+| --- | --- | --- |
+| Part numbers `0`, `-1`, `part_count + 1`, a duplicate, and a batch of 21 | 422 `UPLOAD_PART_INVALID`. No URL in the body | 4 |
+| Presign for another user's video | 404 | 4 |
+| `PUT` with `Content-Length` larger than the signed length | MinIO 403. `ListParts` does not show that part | 4 |
+| Complete when a part size does not match the signed length | 422 `UPLOAD_REJECTED`, no job, reservation released only after abort, video `failed` | 4 |
+| Two concurrent complete calls | One success, one `409 UPLOAD_IN_PROGRESS` or a second 200 after the first commits. Exactly one job | 4 |
+| Complete repeated after success | 200 and still one job | 4 |
+| Presign or complete after `expires_at` | 409 `UPLOAD_EXPIRED` | 4 |
+| Sweeper on an expired session | Multipart upload aborted, `bytes_reserved` returned | 4 |
+| Two inits that together exceed the quota | One succeeds, one is rejected, `bytes_reserved + bytes_committed` never exceeds `bytes_limit` | 4 |
+| Unsigned `PUT` to the bucket | 403 | 4 |
+| Bucket policy document | No `Principal` `*` and no `s3:*`. API startup check covers the same assertion | 4 |
+| API process environment in the test stack | Does not include `MINIO_ROOT_PASSWORD` | 1 |
+
+### 9.4 Other controls
+
+- An unlisted video is watchable with the id and absent from feed, search, related videos, and the public channel list. Stage 3.
+- A client-supplied `role` on registration does not create a moderator. Stage 2.
+- Logout increments epoch: the old access token is rejected, and the old refresh token is rejected. Stage 2.
+- Reuse of a rotated refresh token revokes the family. Stage 2.
+- A non-video payload that passes the content-type allow-list is marked `failed` with `invalid_media` and never becomes `ready`. Stage 5.
+- The moderation audit trigger rejects `UPDATE` and `DELETE`. Stage 10.
+- Segment redirect `Location` host equals `S3_PUBLIC_BASE_URL`. A unit test of the host check rejects any other host. Stage 6.
+
+## 10. Residual risk
 
 - A stolen access token works until logout's epoch check. Epoch check closes that on logout. A stolen token before logout works until logout or expiry. That is normal for bearer tokens.
 - iOS fallback playlists, if enabled, lengthen the revoke window to the presign TTL of those URLs.
 - FFmpeg and Pillow can have memory-corruption bugs. Isolation is non-root, no published port, protocol whitelist, and timeouts. It is not a sandbox such as gVisor. That extra sandbox is out of scope on a single Docker host unless the operator adds it later.
 - One server is a single point of compromise. Disk encryption and host hardening are operator responsibilities. The application design does not replace them.
 - There is no email verification, so disposable accounts can upload until quotas and rate limits stop them.
+- MinIO still has root credentials in the `minio` process, because the server will not boot without them. Those values are not in the API, worker, edge, or frontend environment. A person who can read the MinIO container environment can administer the bucket.
+- If a future change signs part URLs without `Content-Length`, a client can store parts larger than the reservation until the sweeper aborts them. The stage 4 oversized-`PUT` test is what keeps that regression visible. The bucket quota limits the damage and does not make the bug acceptable.

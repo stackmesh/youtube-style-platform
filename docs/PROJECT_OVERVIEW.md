@@ -153,7 +153,7 @@ The API enforces roles. The frontend hides controls only as a convenience.
 - Passwords hashed with Argon2id.
 - Private buckets. MinIO credentials never leave the server.
 - Private and unlisted playback authorized on the server.
-- Upload size, type, duration, quota, and rate limits enforced on the server.
+- Upload size, type, duration, quota, and rate limits enforced on the server. Each presigned part URL is bound to one exact length, so it cannot store more than the reserved quota.
 - Privileged actions audited and append-only.
 - OWASP-class controls for access control, injection, XSS, CSRF, and security headers are part of the design, not a later pass.
 
@@ -174,7 +174,7 @@ The API enforces roles. The frontend hides controls only as a convenience.
 
 ### Operability
 
-- One command on a clean Ubuntu host: `bash deploy/ubuntu-up.sh`.
+- One command on a clean Ubuntu host: `bash deploy/ubuntu-up.sh`. The script checks the OS, Docker, free disk, and environment, refuses to delete volumes, and exits with a `deploy: FAIL` line when startup or migration does not become healthy.
 - Configuration by environment variables.
 - JSON logs with a request id.
 - Persistent volumes for PostgreSQL, Redis, MinIO, and transcode scratch space.

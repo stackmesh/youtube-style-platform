@@ -273,8 +273,8 @@ There is no distributed transaction across PostgreSQL and MinIO. The design uses
 | Step | Durable state if the process crashes |
 | --- | --- |
 | After draft insert | Video `draft`. No objects |
-| After multipart start | Upload session `initiated`, quota reserved, MinIO upload id stored |
-| After parts uploaded, before complete | MinIO holds parts. Sweeper aborts the session after `expires_at` |
+| After multipart start | Upload session `initiated`, quota reserved, MinIO upload id stored. Part URLs are signed for an exact `Content-Length` |
+| After parts uploaded, before complete | MinIO holds only parts whose size matched the signature. Sweeper aborts the session after `expires_at` |
 | After MinIO complete, before DB commit | Session left in `completing`. Sweeper sees the object and finishes the DB transition |
 | After DB commit | Video `uploaded`, one queued job |
 | During transcode | Job `running` with `locked_until`. Stale lock returns the job to `queued` |
@@ -293,10 +293,16 @@ Environment variables are the only configuration channel. A `.env` file is gener
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL |
 | `REDIS_URL` | Redis URL |
-| `MINIO_ENDPOINT` | Internal `minio:9000` |
+| `MINIO_ENDPOINT` | Internal `minio:9000`. API and worker only |
 | `S3_PUBLIC_BASE_URL` | `https://s3.<domain>` used only to presign |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Server-side only |
+| `MINIO_DOMAIN` | `s3.<domain>`, given to the MinIO process |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `media-app` credentials. API and worker only |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO process and `minio-init` only. Not in the API environment |
 | `MINIO_BUCKET` | Default `media` |
+| `MINIO_BUCKET_QUOTA_BYTES` | Hard bucket cap set by init |
+| `PART_SIZE_BYTES` | `16777216` |
+| `MAX_PARTS` | `512` |
+| `UPLOAD_PART_URL_TTL_SECONDS` | Default 1200 |
 | `JWT_SECRET` | HMAC secret, at least 32 bytes |
 | `ACCESS_TOKEN_TTL_SECONDS` | Default 900 |
 | `REFRESH_TOKEN_TTL_SECONDS` | Default 1209600 |
@@ -345,32 +351,33 @@ Uncaught exceptions become `INTERNAL_ERROR` with a 500 and a server-side stack t
 | Path | Behavior |
 | --- | --- |
 | `GET /health/live` | 200 if the process can serve. No dependency checks |
-| `GET /health/ready` | 200 only if PostgreSQL answers `SELECT 1`, Redis answers `PING`, the bucket exists, and `worker:heartbeat` is newer than 2 minutes |
+| `GET /health/ready` | 200 only if PostgreSQL answers `SELECT 1`, Redis answers `PING`, the application credentials can see the bucket, and `worker:heartbeat` is newer than 2 minutes. The bucket-policy match and the absence of root credentials are startup checks, not part of every ready probe |
 
 Compose uses liveness to restart a stuck API process and readiness to order startup. The setup script blocks until ready.
 
 ## 7. Deployment topology
 
-Compose services:
+Compose services, in start order:
 
-| Service | Image | Published port |
-| --- | --- | --- |
-| `edge` | Caddy plus the static build | 80, 443 |
-| `api` | Backend API target | none |
-| `worker` | Backend worker target | none |
-| `postgres` | PostgreSQL 16 | none |
-| `redis` | Redis 7, AOF on | none |
-| `minio` | MinIO | none |
+| Order | Service | Role | Published port |
+| --- | --- | --- | --- |
+| 1 | `postgres` | PostgreSQL 16. Healthcheck `pg_isready` | none |
+| 1 | `redis` | Redis 7, AOF on. Healthcheck `PING` | none |
+| 1 | `minio` | MinIO. `MINIO_BROWSER=off`. Healthcheck is a TCP check on 9000 inside the network | none |
+| 2 | `minio-init` | One-shot. Creates the bucket, `media-app`, policy, CORS, lifecycle, and bucket quota. Exits 0 on repeat | none |
+| 3 | `api` | Migrates, then serves. Depends on postgres healthy, redis healthy, and `minio-init` completed | none |
+| 4 | `worker` | Heartbeat, sweepers, and transcode. Depends on `api` healthy so the schema exists | none |
+| 5 | `edge` | Caddy plus the static build. Depends on `api` healthy | 80, 443 |
 
-Volumes: `pg_data`, `redis_data`, `minio_data`, `work_data`.
+Volumes: `pg_data`, `redis_data`, `minio_data`, `work_data`. `work_data` holds transcode scratch and may be recreated. The other three may not.
 
-The API container runs Alembic `upgrade head` before binding the port, using a PostgreSQL advisory lock so two API replicas cannot migrate at once. The first release runs one API container anyway.
+The API container runs Alembic `upgrade head` before binding the port, under a PostgreSQL advisory lock. Each revision runs in a transaction. A failed revision rolls back and the process exits non-zero without listening. Compose may restart it. The deploy script does not treat a restart loop as success, and it does not run `downgrade`.
 
-`deploy/ubuntu-up.sh` installs Docker Engine and the Compose plugin if they are missing, generates secrets into `.env` with mode 600, builds, starts, waits for `/health/ready`, and prints the URL. That script is specified here and implemented in a later stage. It does not exist yet.
+`bash deploy/ubuntu-up.sh` is the only install path. The script does not exist yet. Its required behavior is specified in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md). In short: check Ubuntu, Docker, disk, and environment; refuse to delete or recreate persistent volumes on a repeat run; start in the order above; require `/health/ready` 200; print `deploy: FAIL <code>` and exit non-zero on any failed check. Re-running the script does not rotate secrets and does not create a second admin.
 
 ### Backups
 
-`deploy/backup.sh` (later stage) writes a `pg_dump` custom-format archive and a restic or filesystem snapshot note for the MinIO volume. Restore is a documented manual procedure: stop the API and worker, restore the database, restore the volume, start, run a consistency sweep. Backup automation beyond a script and a cron example is out of scope.
+`deploy/backup.sh` (later stage) writes a `pg_dump` custom-format archive and an `mc mirror` of bucket `media` using the `media-app` credentials. It then runs `pg_restore -l` and fails the backup if the archive has no table of contents. Restore is a documented manual procedure in `deploy/restore.md`: stop the API and worker, restore the database, restore the mirror into the bucket, start, run the sweeper once. The install script does not restore, and it never deletes volumes as part of a failed deploy. One restore rehearsal is part of stage 12. Backup automation beyond the script and a cron example is out of scope.
 
 ## 8. Technology decisions
 

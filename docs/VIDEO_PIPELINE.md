@@ -4,7 +4,7 @@
 
 This document specifies how a video moves from a file on the user's machine to an HLS stream, how failures are recovered, and how private bytes stay private.
 
-Related decisions: ADR-002, ADR-003, ADR-004, ADR-008, ADR-013, ADR-019, ADR-023, ADR-025.
+Related decisions: ADR-002, ADR-003, ADR-004, ADR-008, ADR-013, ADR-019, ADR-023, ADR-025, ADR-031, ADR-032.
 
 ## 1. Goals and non-goals
 
@@ -47,6 +47,8 @@ Bucket lifecycle rule, as a backstop behind the sweeper:
 
 - abort incomplete multipart uploads after 1 day
 
+The deploy init also sets a hard bucket quota (`MINIO_BUCKET_QUOTA_BYTES`). That cap is disk protection for the whole bucket. It is not a per-user quota. Per-user quota stays in PostgreSQL.
+
 Object expiry of originals is not enabled. Originals are kept so a failed transcode can be retried without asking the user to upload again. The cost is disk. The quota charges the original size plus the HLS and thumbnail sizes actually stored.
 
 ## 3. Upload lifecycle
@@ -66,21 +68,43 @@ sequenceDiagram
   A->>DB: store minio upload id
   loop each part batch
     B->>A: POST /upload/parts
-    A-->>B: presigned PUT urls
-    B->>M: PUT part
+    A-->>B: presigned PUT urls bound to an exact Content-Length
+    B->>M: PUT part with that Content-Length
   end
   B->>A: POST /upload/complete with etags
-  A->>M: complete multipart
-  A->>M: head object
+  A->>DB: lock session, one completer wins
+  A->>M: ListParts, then complete only if sizes match
+  A->>M: head object and require the exact declared size
   A->>DB: session completed, video uploaded, insert job
-  Note over A,DB: If the DB commit fails, session stays completing and the sweeper finishes it
+  Note over A,DB: A second complete returns the same video and does not create a second job
 ```
 
 ### 3.1 Create draft
 
 `POST /api/v1/videos` validates metadata and inserts a video with `processing_status = draft` and `visibility` as requested, default `private`. No quota change yet. A draft that never starts an upload is abandoned by the sweeper after 24 hours.
 
-### 3.2 Initiate multipart upload
+### 3.2 Part geometry
+
+These values are fixed so a presigned URL cannot grow past the reserved quota (ADR-031).
+
+| Constant | Value |
+| --- | --- |
+| `PART_SIZE_BYTES` | 16 MiB (16777216). Every non-final part is this size, not "up to" this size |
+| `MAX_PARTS` | 512. Startup refuses `MAX_UPLOAD_BYTES` larger than `PART_SIZE_BYTES * MAX_PARTS` (8 GiB) |
+| Default `MAX_UPLOAD_BYTES` | 2 GiB, which is 128 parts |
+| Part URL lifetime | 20 minutes |
+| Session lifetime | 24 hours |
+
+`part_count = ceil(byte_size / PART_SIZE_BYTES)`.
+
+For part number `n`:
+
+- if `n < part_count`, the signed `Content-Length` is exactly `PART_SIZE_BYTES`
+- if `n = part_count`, the signed `Content-Length` is `byte_size - (part_count - 1) * PART_SIZE_BYTES`, which is from 1 byte through `PART_SIZE_BYTES`
+
+A one-part upload may be smaller than 5 MiB. S3 allows that only for the final part. Every earlier part is 16 MiB, which is above the S3 minimum of 5 MiB.
+
+### 3.3 Initiate multipart upload
 
 `POST /api/v1/videos/{id}/upload` body: `byte_size`, `content_type`.
 
@@ -89,66 +113,121 @@ The service rejects the request unless all of the following hold:
 - caller owns the video
 - status is `draft`
 - `byte_size` is between 1 and `MAX_UPLOAD_BYTES`
+- `part_count` computed above is between 1 and `MAX_PARTS`
 - `content_type` is one of `video/mp4`, `video/quicktime`, `video/webm`, `video/x-matroska`, `video/mpeg`
 - the user has fewer than `MAX_ACTIVE_UPLOADS` sessions in `initiated` or `completing`
 - `bytes_committed + bytes_reserved + byte_size <= bytes_limit` under `SELECT FOR UPDATE` on the quota row
 
-On success the service reserves `byte_size`, inserts an upload session with `expires_at = now() + 24 hours` and `part_size = 16 MiB`, creates the multipart upload on key `originals/{video_id}/source`, and stores the MinIO upload id. Video status becomes `uploading`.
+On success, in one transaction, the service reserves `byte_size` and inserts an upload session with `expires_at = now() + 24 hours`, `part_size = PART_SIZE_BYTES`, `part_count`, and `minio_upload_id` null. It then creates the multipart upload on key `originals/{video_id}/source`. A second transaction stores the upload id and sets the video to `uploading`.
 
-Part size is 16 MiB. S3 requires non-final parts to be at least 5 MiB. 16 MiB keeps a 2 GB file at 128 parts.
+If create-multipart fails, the service releases the reservation, marks the session `aborted`, and returns `503 STORAGE_UNAVAILABLE`. The video returns to `draft` so the owner can try again. No job is inserted.
 
-### 3.3 Presign parts
+If the process dies after MinIO created the upload and before the upload id is stored, the id is lost. The sweeper releases that reservation after 5 minutes. A reconciliation pass aborts multipart uploads whose id is not in `upload_sessions`. The lifecycle rule is the backstop if both the API and the sweeper are down.
 
-`POST /api/v1/videos/{id}/upload/parts` body: `part_numbers` (at most 20).
+### 3.4 Presign parts
 
-The API returns presigned `PUT` URLs for those part numbers. URLs expire after 20 minutes. The browser may ask again for the same part numbers if a URL expired; presigning is idempotent and does not change the upload id.
+`POST /api/v1/videos/{id}/upload/parts` body: `part_numbers`, at most 20 numbers.
 
-Presigning uses `S3_PUBLIC_BASE_URL` and path-style addressing so the signature matches the `Host` header Caddy forwards to MinIO. The browser never receives `MINIO_ACCESS_KEY` or `MINIO_SECRET_KEY`.
+The API rejects the call with `422 UPLOAD_PART_INVALID` when:
 
-### 3.4 Complete
+- the session is missing, not `initiated`, expired, or not owned by the caller
+- the list is empty, longer than 20, or contains duplicates
+- any number is not an integer from 1 through `part_count` inclusive
+- any number is greater than `MAX_PARTS`
 
-`POST /api/v1/videos/{id}/upload/complete` body: list of `{part_number, etag}`.
+Otherwise it returns one presigned `PUT` per number. Each URL is SigV4, path-style, bound to that object key, that upload id, that part number, and the exact `Content-Length` from section 3.2. `SignedHeaders` includes `host` and `content-length`. The response tells the client the `content_length` it must send. URLs expire after 20 minutes. Asking again for the same numbers returns new URLs for the same upload id and the same lengths.
 
-Order of operations:
+A `PUT` with any other length fails signature validation in MinIO and stores nothing. The API does not accept a client-supplied length.
 
-1. If the session is already `completed` and the video is `uploaded`, `processing`, `ready`, or `failed`, return the current video. The call is idempotent.
-2. Set the session to `completing`.
-3. Complete the multipart upload in MinIO.
-4. `HEAD` the object. Reject if the size differs from `expected_size` by more than 1 percent or is zero. On rejection, abort the MinIO upload if it still exists, mark the session `aborted`, release the reservation, set the video `failed` with a fatal validation error, and do not enqueue a job.
-5. In one database transaction: session `completed`, reservation released, `bytes_committed` increased by the actual size, video `processing_status = uploaded`, `original_object_key` and `source_byte_size` set, one `video_processing_jobs` row inserted with `status = queued`, `attempt = 1`, `next_run_at = now()`.
+Presigning uses `S3_PUBLIC_BASE_URL`. The browser never receives `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_ROOT_USER`, or `MINIO_ROOT_PASSWORD`.
 
-If step 5 fails, the object exists and the session remains `completing`. The sweeper completes step 5. It does not complete the multipart upload twice.
+### 3.5 Complete
 
-If step 3 fails with a network error, the session stays `initiated` or is returned to `initiated`, and the client may retry complete.
+`POST /api/v1/videos/{id}/upload/complete` body: `parts: [{part_number, etag}]`.
 
-### 3.5 Abort
+The client list is a hint. `ListParts` is the authority.
 
-`POST /api/v1/videos/{id}/upload/abort` aborts the multipart upload, sets the session `aborted`, releases the reservation, and sets the video `abandoned` when it was `uploading`.
+1. Lock the session with `SELECT ... FOR UPDATE`.
+2. If status is `completed` and the video is `uploaded`, `processing`, `ready`, or `failed` because processing failed after a good upload, return the current video. Do not call `CompleteMultipartUpload` again. The unique active-job index is the second guard.
+3. If status is `aborted` or `expired`, return `409 INVALID_STATE` or `409 UPLOAD_EXPIRED`.
+4. If `expires_at` has passed, return `409 UPLOAD_EXPIRED` and leave cleanup to the sweeper.
+5. If status is `completing`, `completion_started_at` is within the last 2 minutes, and `completion_token` is not this request, return `409 UPLOAD_IN_PROGRESS`.
+6. Otherwise set `completing`, a new `completion_token`, and `completion_started_at = now()`, then commit so the row lock is not held during MinIO calls.
 
-### 3.6 Custom thumbnail
+After the lock is released:
+
+7. `ListParts` for that upload id. This call uses the application credentials on the internal MinIO endpoint.
+8. Reject unless the part numbers are exactly the set `1 .. part_count`, with no gaps and no extras.
+9. Reject unless each part's `Size` equals the signed length for that part number, and the sum equals `expected_size` exactly. There is no percentage tolerance. A tolerance would let a caller store more bytes than the quota reservation.
+10. Reject unless every client ETag matches the ETag `ListParts` returned for that part number. Compare the hex value, ignoring surrounding quotes.
+11. `CompleteMultipartUpload` using the `ListParts` ETags.
+12. `HEAD` the object. Reject unless `Content-Length` equals `expected_size` and the key is `originals/{video_id}/source`.
+
+On any rejection in steps 7–12 the service aborts the multipart upload, deletes the object if `HEAD` shows it exists, and only then releases `bytes_reserved`. The session becomes `aborted`, `error_code` is `upload_rejected`, and the video becomes `failed`. Processing retry is refused because there is no valid original. The owner deletes the video and uploads again. If the abort itself fails, the reservation stays, the session stays `completing` with `error_code` set, and the sweeper retries the abort. Quota is not returned while parts may still be on disk.
+
+On success, one transaction locks the session again, checks `completion_token`, and then:
+
+- session `completed`, `completed_at` set
+- reservation released
+- `bytes_committed` increased by `expected_size` (the same number `HEAD` returned)
+- video `processing_status = uploaded`, `original_object_key` and `source_byte_size` set
+- one queued job inserted
+
+If that commit fails, the object exists and the session stays `completing` with no `error_code`. The sweeper finishes the database transition. It `HEAD`s the object first and does not call `CompleteMultipartUpload` when the object is already present.
+
+A network error before `CompleteMultipartUpload` returns the session to `initiated`, clears the token, and responds `503 STORAGE_UNAVAILABLE`. The client may retry immediately.
+
+A network error from `CompleteMultipartUpload` is followed by `HEAD`. A matching object finishes the database transition. A missing object returns the session to `initiated` and responds `503`. If `HEAD` also fails, the session stays `completing` and the response is `503`. A retry then receives `409 UPLOAD_IN_PROGRESS` with `Retry-After: 5` until the 2 minute window passes. After that, the retry or the sweeper continues the same checks. The reservation is held through all of these paths.
+
+### 3.6 Abort
+
+`POST /api/v1/videos/{id}/upload/abort` takes the same session lock. It aborts the multipart upload when an upload id exists, deletes a stray object at the key, sets the session `aborted`, releases the reservation only after that abort succeeds, and sets the video `abandoned` when it was `uploading`. A second abort returns `204`.
+
+### 3.7 Who enforces each check
+
+| Check | API | MinIO |
+| --- | --- | --- |
+| Caller owns the video and the session is active | Yes | No user model |
+| `byte_size` ≤ `MAX_UPLOAD_BYTES` and `part_count` ≤ `MAX_PARTS` | Yes, at initiate | No. S3's own ceiling is 10,000 parts and 5 GiB per part |
+| Part numbers are unique and inside `1 .. part_count` | Yes, before any URL is signed | A URL signed for part 3 fails if it is sent as part 4, because `partNumber` is in the signature |
+| Non-final part is exactly 16 MiB, final part is the exact remainder | Yes. The signature covers `Content-Length`. Complete compares `ListParts` sizes with those lengths | Yes. A different `Content-Length` fails SigV4 and MinIO stores no part. MinIO also rejects a non-final part under 5 MiB and any part over 5 GiB |
+| Sum of stored parts equals `expected_size` | Yes, from `ListParts` and again from `HEAD` | No. MinIO does not know the declared size |
+| Client ETags match stored parts | Yes | MinIO returns the ETags; it does not see the client's complete body as authority until the API sends it |
+| Quota reservation and commit | Yes, row lock in PostgreSQL | No per-user quota |
+| Duplicate complete | Yes. `completed` returns the current video. One active job per video | A second `CompleteMultipartUpload` returns `NoSuchUpload`. The API must not treat that error as success unless `HEAD` already shows the verified object |
+| Concurrent complete | Yes. Row lock plus `completion_token`. The loser receives `409 UPLOAD_IN_PROGRESS` | Not used as the concurrency control |
+| Expired session cannot be presigned or completed | Yes | No |
+| Abandoned and expired multipart uploads are aborted | Yes, sweeper, including uploads whose id is missing from `upload_sessions` after 15 minutes | Lifecycle aborts incomplete multipart uploads after 1 day even if the sweeper is down |
+| Unsigned or anonymous writes | The API never issues those URLs | Bucket policy has no allow for `Principal: "*"`. Unsigned `PUT` and `GET` are denied |
+| Whole-bucket disk cap | Deploy sets it; the API does not | Hard bucket quota |
+
+Presigned upload URLs are therefore not a blank write capability. Each URL can store one part, of one signed length, for 20 minutes. The maximum bytes a session can store is `expected_size`, which was reserved against the user quota before any URL existed.
+
+### 3.8 Cleanup of incomplete uploads
+
+The sweeper runs every 60 seconds.
+
+| Condition | Action |
+| --- | --- |
+| Session `initiated`, `minio_upload_id` null, older than 5 minutes | Release reservation, session `aborted`, video `abandoned` if it was still `draft` |
+| Session `initiated` and `expires_at` passed | Abort multipart upload, then release reservation, session `expired`, video `abandoned` |
+| Session `completing`, `error_code` set | Retry abort and object delete, then release reservation, session `aborted`, video `failed` |
+| Session `completing`, no `error_code`, older than 2 minutes, `HEAD` size equals `expected_size` | Finish the database completion transition if no active job exists. Do not complete the multipart upload again |
+| Session `completing`, no `error_code`, older than 2 minutes, object missing | Run the same `ListParts` checks as complete. Valid parts are completed. Invalid parts are aborted |
+| Video `draft` older than 24 hours | Set `abandoned` |
+| Multipart upload under `originals/` whose upload id is not stored on a session, and whose MinIO `Initiated` time is older than 15 minutes | `AbortMultipartUpload` |
+| Video `uploaded` with no queued or running job, and fewer than 6 historical jobs | Insert a queued job |
+| Job `running` and `locked_until` passed | Set job `queued`, clear lock, set video `uploaded`, set `next_run_at = now()` |
+
+Abort of an already-aborted upload is success. The reservation is released only after abort or after `HEAD` confirms the object is gone. Abandoned videos do not appear in any feed. Bytes are not committed.
+
+### 3.9 Custom thumbnail
 
 Thumbnails are small. They are posted to the API as `multipart/form-data`, maximum 2 MB, types JPEG, PNG, or WebP.
 
 The API decodes the image with Pillow, rejects files that do not decode or exceed 1920×1080, strips metadata by re-encoding to JPEG quality 85, and stores `thumbnails/{video_id}/custom.jpg`. The custom thumbnail may be uploaded any time after the draft exists, including before processing finishes. It does not pass through the video worker.
 
 Avatars use the same re-encode path and the key `avatars/{channel_id}.jpg`.
-
-### 3.7 Cleanup of incomplete uploads
-
-The sweeper runs every 60 seconds and also acts as the repair tool for the cases below.
-
-| Condition | Action |
-| --- | --- |
-| Session `initiated` and `expires_at` passed | Abort multipart upload, release reservation, session `expired`, video `abandoned` if it was `uploading` |
-| Session `completing` and object `HEAD` succeeds | Finish the database completion transition if no active job exists |
-| Session `completing` and object missing, older than 15 minutes | Abort if needed, release reservation, session `aborted`, video `abandoned` |
-| Video `draft` older than 24 hours | Set `abandoned` |
-| Video `uploaded` with no queued or running job, and fewer than 6 historical jobs | Insert a queued job |
-| Job `running` and `locked_until` passed | Set job `queued`, clear lock, set video `uploaded`, set `next_run_at = now()` |
-
-MinIO's lifecycle rule aborts multipart uploads after 1 day even if the sweeper is down. The database can then show a session the sweeper will mark expired on its next successful `AbortMultipartUpload` (Abort on an already-aborted upload is treated as success).
-
-Abandoned videos do not appear in any feed. The owner sees the status and can delete the draft. Bytes are not committed.
 
 ## 4. Processing
 
@@ -157,8 +236,9 @@ stateDiagram-v2
   [*] --> draft
   draft --> uploading: init
   draft --> abandoned: sweeper
-  uploading --> uploaded: complete
+  uploading --> uploaded: complete verified
   uploading --> abandoned: abort or expiry
+  uploading --> failed: part list or size rejected
   uploaded --> processing: worker claims
   processing --> ready: finalize
   processing --> uploaded: retryable failure or stale lock
@@ -167,6 +247,8 @@ stateDiagram-v2
 ```
 
 Job row states are `queued`, `running`, `succeeded`, `failed`, and `cancelled`. The video state and the job state are not the same column and must not be collapsed.
+
+`failed → uploaded` is only the owner retry of a processed original. Upload verification failure does not take that edge. There is no original to process.
 
 ### 4.1 Claim
 
@@ -280,7 +362,9 @@ Backoff for retryable errors, by attempt number: 1 minute, 5 minutes, 15 minutes
 
 After the third automatic failure the video stays `failed`. The owner may call the retry endpoint up to three more times. Each manual retry inserts a new job only if none is active, the lifetime row count is below 6, and the original object still exists. A manual retry is rate limited to 3 per video per day, which matches the lifetime cap.
 
-`error_code` values are stable strings: `invalid_media`, `duration_exceeded`, `ffmpeg_failed`, `ffmpeg_timeout`, `storage_error`, `insufficient_disk`, `playlist_invalid`. The UI can map these to sentences. Raw FFmpeg stderr is not returned to the client; it stays on the job row for the operator.
+`error_code` values are stable strings: `invalid_media`, `duration_exceeded`, `ffmpeg_failed`, `ffmpeg_timeout`, `storage_error`, `insufficient_disk`, `playlist_invalid`, `upload_rejected`. Upload rejection is stored on the upload session. The processing endpoint returns it when the video is `failed` and no job exists. The UI can map these to sentences. Raw FFmpeg stderr is not returned to the client; it stays on the job row for the operator.
+
+Owner retry requires the original object. A video that failed upload verification has no original, so retry returns `409 INVALID_STATE`.
 
 ### Videos that upload and are never processed
 
@@ -358,9 +442,12 @@ A running job observes `deleted_at` before finalize and cancels itself.
 
 | Limit | Default |
 | --- | --- |
-| Max upload size | 2 GB |
+| Max upload size | 2 GB, and never above 8 GB (`MAX_PARTS` × 16 MiB) |
+| Part size | Exactly 16 MiB for every part except the last, which is the exact remainder |
+| Max parts per upload | 512, and only `part_count` numbers are ever signed |
 | Max duration | 60 minutes |
-| Quota | 10 GB committed per user |
+| Quota | 10 GB committed per user, reserved before any part URL is issued |
+| Bucket quota | Hard cap configured at deploy, separate from the per-user quota |
 | Active uploads | 2 per user |
 | Part URL batch | 20 |
 | Part URL lifetime | 20 minutes |

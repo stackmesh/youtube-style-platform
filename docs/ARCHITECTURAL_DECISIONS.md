@@ -32,7 +32,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Why.** Video files are large. Proxying them through the API ties up workers and tempts the process to buffer. A single `PUT` does not give natural part progress or retries of one part. Multipart S3 is supported by MinIO and needs no extra protocol. TUS is a reasonable alternative and was rejected because it adds a second upload protocol on top of S3, which MinIO would still store.
 
-**Limitations.** The browser must be able to reach the S3 host. CORS and `Host`-preserving proxy configuration are part of the design, not optional polish. Part size is fixed at 16 MiB. Uploads expire after 24 hours; longer pause-and-resume is out of scope.
+**Limitations.** The browser must be able to reach the S3 host. CORS and `Host`-preserving proxy configuration are part of the design, not optional polish. Part size is fixed at 16 MiB and is signed into each part URL (ADR-031). Uploads expire after 24 hours; longer pause-and-resume is out of scope.
 
 ## ADR-004 — Private playback through API playlists and segment redirects
 
@@ -259,7 +259,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Why.** Checking only at the end allows many parallel uploads to pass and then fail, or worse, to succeed and overshoot without bound. Charging the worst-case HLS size up front would block legitimate uploads of small files on a nearly full quota. Allowing transcode overage avoids throwing away a finished encode.
 
-**Limitations.** A user can be over the limit after processing. The studio must show that state. Reservation of a declared size that is a lie is limited by the 1 percent size check at completion and by the 2 GB cap.
+**Limitations.** A user can be over the limit after HLS expansion. The studio must show that state. A declared size that does not match the stored parts is rejected exactly, not within a percentage, so the declaration cannot be used to reserve a small quota and store a large object (ADR-031). The upload cap is 2 GB by default and cannot be configured above 8 GB.
 
 ## ADR-026 — No generic unit of work or repository framework
 
@@ -311,6 +311,36 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Limitations.** Public dislike counts change creator behavior and can be brigaded. If the product owner rejects this, the API can omit the field for non-owners without a schema change. Confirmation is listed below.
 
+## ADR-031 — Upload part URLs are bound to an exact length
+
+**Decision.** Every presigned `UploadPart` URL signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder of `expected_size`. `part_count` is at most 512. Complete calls `ListParts`, requires those sizes and a matching sum, then requires `HEAD` to return `expected_size`. There is no percentage tolerance. Quota reserved at initiate is the maximum those URLs can store. Concurrent completes serialize on the session row. A completed session returns the same video and does not insert a second job. Expired and untracked multipart uploads are aborted by the sweeper, with a one-day MinIO lifecycle rule behind it.
+
+**Alternatives.** Trust the client's ETag list. Allow a size tolerance. Sign URLs without `Content-Length` and rely on complete-time rejection. Proxy the file through the API so size is observed on the way through.
+
+**Why.** A presigned `PUT` that does not sign the length can store a multi-gigabyte part while the quota reservation stays small. Complete-time rejection would delete it later and would still have consumed disk. Signing the length makes MinIO refuse the `PUT`. `ListParts` catches a part that was stored by any other bug. The tolerance that was in the first draft of this design was removed because it was a quota bypass.
+
+**Limitations.** The browser and Caddy must pass `Content-Length` through unchanged. That is an implementation-time test, not an assumption. If MinIO or the presign helper silently omits the header from `SignedHeaders`, the stage 4 oversized `PUT` test fails the build. A bucket quota still caps total disk use and does not replace the signature.
+
+## ADR-032 — Separate MinIO root and application credentials
+
+**Decision.** The MinIO process and a one-shot init container hold root credentials. Init creates user `media-app` and attaches the bucket policy in [SECURITY_DESIGN.md](SECURITY_DESIGN.md). The API and the worker receive only `media-app`. The API exits if root credentials are in its environment. The bucket policy has no `Principal: "*"` and no `s3:*`. The console is off. Ports 9000 and 9001 are not published. CORS allows one origin, methods `GET`, `PUT`, and `HEAD`, and exposes `ETag` only.
+
+**Alternatives.** One root key for every container. A public-read policy for HLS. Console published on localhost only.
+
+**Why.** Root can change policy, create users, and read every bucket. The frontend and the API do not need that. A leaked API environment should not be an account that can make the bucket public. Presigned URLs remain the only browser capability, and they are minted by `media-app` after an authorization check.
+
+**Limitations.** The MinIO server itself still has root in its environment. That is how MinIO boots. Host access to the container environment is full administrative access. Init must stay idempotent so a repeat deploy does not rotate `media-app` out from under running processes.
+
+## ADR-033 — The install script is not allowed to destroy data
+
+**Decision.** `bash deploy/ubuntu-up.sh` checks OS, Docker, disk, memory, and environment before it starts containers. It creates persistent volumes on first install and refuses to recreate `pg_data`, `redis_data`, or `minio_data` when `.env` already exists. It never runs `down -v`. It waits for `/health/ready`. A migration failure stops the script, leaves the volume in place, and prints `deploy: FAIL migrate`. Repeat runs do not rotate secrets. Restore is a separate documented procedure, and a backup is not accepted unless `pg_restore -l` succeeds.
+
+**Alternatives.** A short script that only runs `docker compose up -d`. Auto-restore when migrations fail. Recreate volumes whenever the script is unsure.
+
+**Why.** A one-command install on a clean machine is the requirement. The same command will be run again on a machine that already has users and videos. Those runs must be boring. A failed migration that deletes the volume would be worse than a failed migration.
+
+**Limitations.** The script cannot repair a migration that committed and then proved wrong. That recovery is restore-from-backup. The script also cannot install Ubuntu packages on a host without apt and systemd.
+
 ## 10. Cross-cutting rules that are easy to break
 
 These are decisions even though they are short.
@@ -321,6 +351,8 @@ These are decisions even though they are short.
 - Video bytes never go in PostgreSQL and never go through the API, except thumbnails and avatars under 2 MB.
 - Processing jobs are idempotent at the object-key level and unique while active.
 - A private or hidden video is not delivered by making a prefix public.
+- An upload part URL signs one `Content-Length`. Complete trusts `ListParts` and `HEAD`, not the client's size claim.
+- MinIO root credentials are not placed in the API, worker, edge, or frontend environment.
 
 ## 11. Confirmations still open
 
@@ -359,6 +391,9 @@ The documents were checked against each other after the playback and logout desi
 | Grants vs visibility | Grants are retained and apply only while visibility is `private`. |
 | Counters | Updated in SQL in the same transaction as the source write. |
 | Identifiers | UUID v7 for entities, UUID v4 for playback session ids. |
+| Upload size check | The first draft allowed `HEAD` to differ from the declaration by 1 percent. That tolerated a quota bypass. Every document now requires an exact `Content-Length` signature and an exact `ListParts` / `HEAD` match (ADR-031). |
+| MinIO credentials | The first draft gave the API the same MinIO keys the server uses. Root now stays on the MinIO process and `minio-init`. The API uses `media-app` and exits if it sees root (ADR-032). |
+| Deploy repeat | The install script must not delete volumes or rotate secrets. Failure text is `deploy: FAIL <code>` (ADR-033). |
 
 Remaining gaps are requirements the brief does not give, not contradictions:
 
@@ -369,6 +404,8 @@ Remaining gaps are requirements the brief does not give, not contradictions:
 - iOS redirect behavior is unverified because there is no implementation yet.
 - The audit trigger can be disabled by the table owner. ADR-012 accepts that for the first release.
 
+The stage 00 review below records the changes made after the first design pass. Those changes are already incorporated in the rows above.
+
 ## 13. Known limitations of the whole design
 
 - One host is a single point of failure. Restarts recover containers. They do not recover a lost disk. Backups are daily.
@@ -376,3 +413,51 @@ Remaining gaps are requirements the brief does not give, not contradictions:
 - Search and recommendations are intentionally plain.
 - Transcode concurrency of 1 means a queue forms under batch uploads. Status `uploaded` is the visible "waiting" state.
 - Account recovery does not exist until a mail design is added.
+- A presigned part URL is only as strict as the signature the code actually produces. ADR-031 is enforced by the stage 4 oversized-`PUT` test.
+- MinIO root credentials remain in the MinIO process environment.
+
+## Stage 00 Architecture Review
+
+This section records the review that produced ADR-031, ADR-032, and ADR-033. No application code was written. The eight documents were updated in place.
+
+### Changes made
+
+- Upload part URLs now sign an exact `Content-Length`. Non-final parts are 16 MiB. The final part is the remainder of the declared size. `part_count` is capped at 512, which caps a configured upload at 8 GiB.
+- Complete verifies `ListParts` (part numbers, per-part sizes, sum, ETags) and then `HEAD`. The 1 percent size tolerance was removed.
+- Duplicate complete returns the current video and does not insert a second job. Concurrent complete takes a row lock and returns `409 UPLOAD_IN_PROGRESS` to the loser.
+- Quota is reserved before any part URL is issued and is released only after MinIO abort succeeds, or moved to `bytes_committed` only after the size check passes.
+- Expired sessions are rejected by the API and aborted by the sweeper. Multipart uploads with no session row are aborted after 15 minutes. MinIO lifecycle still aborts incomplete uploads after one day. A hard bucket quota is a disk backstop.
+- `upload_sessions` gained `part_count`, `error_code`, `completion_token`, `completion_started_at`, and a nullable `minio_upload_id`, plus checks that keep part geometry consistent.
+- Upload verification failure moves a video from `uploading` to `failed` and does not allow processing retry.
+- MinIO root credentials are isolated from the API, worker, edge, and frontend. `media-app` gets the explicit bucket policy. CORS, ETag exposure, hostname, and outage behavior are specified.
+- `ubuntu-up.sh` gained preflight checks, volume protection, migration failure handling, startup order, ready validation, and idempotent repeat runs. Backup verification uses `pg_restore -l`.
+- Private-video tests now cover anonymous access, unauthorized users, grantees, revoked grants, playlists, segments, expired and revoked playback sessions, moderator limits, hide and restore, and object-URL exposure. Each test names the stage that automates it.
+
+### Reasons
+
+A presigned `PUT` without a signed length can fill the disk while the database still believes the reservation is small. Complete-time checks alone are too late. Root credentials in the API environment turn any API leak into a storage admin. A one-command script that is safe on a clean machine and destructive on the second run is not an acceptable install path. Private HLS is only as strong as the segment route, so metadata tests are not enough.
+
+### Remaining risks
+
+- A segment download that has already started can finish after a revoke or hide. The next request fails. The transfer URL lives at most two minutes.
+- MinIO's own process still has root credentials. Container-environment access is administrative access.
+- HLS output can push a user over `bytes_limit` after a successful transcode. New uploads are then blocked. The stored objects are not deleted automatically.
+- The audit trigger can be disabled by the table owner.
+- The bucket quota limits total damage from a signing bug. It does not attribute bytes to a user.
+- iOS Safari redirect behavior is still unverified because there is no player yet.
+- There is still no email verification, password reset, or account deletion.
+- One host and daily backups remain the availability design. A lost disk is a restore, and the recovery point is the last successful backup.
+
+### Decisions that require implementation-time verification
+
+| Decision | What to prove | When |
+| --- | --- | --- |
+| SigV4 includes `content-length` in `SignedHeaders` for `UploadPart` | An oversized `PUT` returns 403 from the pinned MinIO and stores no part | Stage 4 |
+| Caddy forwards `Host` and `Content-Length` without breaking the signature | The same `PUT` succeeds when sent through `S3_PUBLIC_BASE_URL`, not only against `minio:9000` | Stage 4 and the stage 12 rehearsal |
+| Browser `fetch` or XHR sends the signed length for a `Blob` body | The upload screen completes a real file | Stage 4 |
+| Bucket policy written by `minio-init` matches section 5.2 of the security document, including on a second run | Unsigned `GET` and `PUT` return 403, and the second run does not rotate `media-app` | Stage 4 and stage 12 |
+| API environment cannot see root credentials | Process environment assertion | Stage 1 |
+| Alembic revisions roll back on failure | Throwaway bad revision, documented in stage 12, not shipped | Stage 12 |
+| Native HLS on iOS follows the segment 302 | Device test. The longer-lived playlist fallback stays off until this fails | Stage 6 |
+
+No technology was added or removed. PostgreSQL remains the job queue. Playback remains an API playlist plus a short redirect. The install command remains `bash deploy/ubuntu-up.sh`.

@@ -1,6 +1,8 @@
 # Development Plan
 
-**Status: plan only. No stage below has been started.**
+**Status: plan only. No implementation stage below has been started.**
+
+Stage 00 is the architecture review recorded in [ARCHITECTURAL_DECISIONS.md](ARCHITECTURAL_DECISIONS.md). It changed the design. It did not add code.
 
 This plan sequences the work so each stage leaves a runnable system. Later stages depend on earlier ones. Frontend work is part of the stage that introduces the feature, not a single stage at the end.
 
@@ -75,24 +77,44 @@ Two Compose entry points:
 | `compose.yaml` | Developer loop. Same services as production. Bind mounts for source are allowed here only |
 | `deploy/compose.prod.yaml` | Built images, no source mounts, restart policies, health checks, named volumes |
 
-Stage 1 creates `compose.yaml` so developers can run the stack. Stage 12 creates `deploy/ubuntu-up.sh` and the production Compose file. The script:
+Stage 1 creates `compose.yaml` so developers can run the stack. Stage 12 creates `deploy/ubuntu-up.sh` and the production Compose file. The command remains `bash deploy/ubuntu-up.sh`.
 
-1. Checks it is running on Ubuntu 22.04 or 24.04.
-2. Installs Docker Engine and the Compose plugin when they are missing, from Docker's official package repository.
-3. Creates `/opt/youtube-clone/.env` with mode 600 if it does not exist, generating `JWT_SECRET`, database password, and MinIO credentials.
-4. Refuses to continue in TLS mode unless `PUBLIC_DOMAIN` is set. Without it, starts demo HTTP mode and prints that cookies are not `Secure`.
-5. Builds and starts the production Compose file.
-6. Waits for `/health/ready`.
-7. Prints the URL, the bootstrap admin email, and where the generated password was written.
+The script prints `deploy: OK <url>` or `deploy: FAIL <code>: <what failed>. <what to do>.` and exits non-zero on failure. It does not continue after a failed check.
 
-The API container applies Alembic migrations before it listens, under a PostgreSQL advisory lock.
+### 3.1 Checks before anything is started
 
-Backups in stage 12:
+| Check | Failure |
+| --- | --- |
+| `/etc/os-release` is Ubuntu 22.04 or 24.04, architecture `x86_64` or `aarch64` | `deploy: FAIL os` |
+| The script can use `sudo` or is already root, and `systemd` is running | `deploy: FAIL privilege` |
+| Filesystem that will hold `/var/lib/docker` and `/opt/youtube-clone` has at least 20 GiB free on first install, and at least 2 GiB free on a repeat run | `deploy: FAIL disk` |
+| `MemTotal` is at least 2 GiB. Below 4 GiB the script prints a warning and continues | `deploy: FAIL memory` only under 2 GiB |
+| `docker info` works and `docker compose version` is v2. If Docker is missing, install Docker Engine and the Compose plugin from Docker's apt repository, then run `docker info` again | `deploy: FAIL docker` |
+| `.env` mode is `600`. Required keys exist. `JWT_SECRET` is at least 32 bytes. `MAX_UPLOAD_BYTES` is between 1 and `PART_SIZE_BYTES * MAX_PARTS`. `CORS_ORIGINS` equals `PUBLIC_APP_URL`. In TLS mode, `PUBLIC_DOMAIN` is set, `PUBLIC_APP_URL` is `https://` that domain, and `S3_PUBLIC_BASE_URL` is `https://s3.` that domain. `COOKIE_SECURE=true` in TLS mode and `false` only when `DEMO_HTTP=1` | `deploy: FAIL env` |
+| API and worker service definitions do not receive `MINIO_ROOT_USER` or `MINIO_ROOT_PASSWORD`. Those live only in `.env.minio-root` | `deploy: FAIL env` |
 
-- `deploy/backup.sh` runs `pg_dump -Fc` and records the MinIO volume path.
-- A sample cron line is printed, daily at 02:15 UTC.
-- Retention is 14 daily dumps, unless the operator changes it.
-- `deploy/restore.md` describes the manual restore. Restore is not a one-command destructive action.
+If `.env` is missing, the script generates it and the root file, mode 600, and continues. If `.env` exists, it does not replace secrets.
+
+### 3.2 Volumes, order, migrations, health
+
+Persistent volumes `pg_data`, `redis_data`, and `minio_data` are created on first install. The script never runs `docker compose down -v` and never removes those volumes. If `.env` already existed and one of those volumes is missing, it stops with `deploy: FAIL volume` and tells the operator to restore the volume. Recreating an empty database over an existing configuration requires moving `.env` aside on purpose. `work_data` may be recreated; the script prints that scratch files will be lost.
+
+Startup order is the table in [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md): postgres, redis, and minio, then `minio-init`, then api (migrate, then listen), then worker, then edge. `depends_on` uses `service_healthy` and, for init, `service_completed_successfully`.
+
+Migrations hold a PostgreSQL advisory lock and run inside a transaction per revision. If Alembic exits non-zero, the API does not listen. The script waits up to 180 seconds for `GET /health/ready` to return 200 with `postgres`, `redis`, `minio`, and `worker` all `ok`. On timeout it prints `deploy: FAIL migrate` or `deploy: FAIL health`, the ready body when one exists, and the last 80 lines of the API log. It does not delete the database and it does not downgrade. PostgreSQL rolls back a failed revision. A revision that was committed stays committed; recovery from a bad committed migration is restore-from-backup, which the failure message says.
+
+After ready, the script checks that ports 5432, 6379, 9000, and 9001 are not listening on a public interface. A hit is `deploy: FAIL exposure`.
+
+A second run of the same script builds and starts again, leaves secrets and volumes in place, and exits 0 when ready. `minio-init` is safe to run again: it creates the bucket, user, policy, CORS, lifecycle, and quota only if they are missing, and it does not rotate `media-app`. Bootstrap creates an admin only when none exists.
+
+### 3.3 Backup and restore
+
+- `deploy/backup.sh` refuses to run unless postgres is ready.
+- It writes `pg_dump -Fc` to `/var/backups/youtube-clone/<timestamp>/db.dump`, mode 600, then runs `pg_restore -l`. An empty or unreadable archive is `deploy: FAIL backup` and the directory is kept for inspection.
+- It mirrors bucket `media` with the `media-app` key into the same timestamp directory.
+- A sample cron line is printed, daily at 02:15 server local time, retention 14 dumps.
+- `deploy/restore.md` is the manual restore. Restore is not a flag on `ubuntu-up.sh`.
+- Stage 12 rehearses one restore: load the dump into a scratch database, `SELECT count(*)` from `users`, mirror into a scratch bucket, and `HEAD` one object. The rehearsal notes record the result. The production volume is not deleted as part of that rehearsal.
 
 The one-command claim applies to install and start. It does not apply to restore.
 
@@ -119,6 +141,7 @@ The one-command claim applies to install and start. It does not apply to restore
 - `/docs` shows the health routes.
 - Logs are JSON and include `request_id`.
 - The migration test runs `upgrade head` on an empty database.
+- The API container environment does not include `MINIO_ROOT_PASSWORD`. The test inspects the process environment.
 - No video or user features are pretended to exist.
 
 ### Stage 2 — Identity and channels
@@ -156,7 +179,7 @@ The one-command claim applies to install and start. It does not apply to restore
 **Definition of done:**
 
 - Feed query uses the partial index, confirmed with `EXPLAIN` in the test notes or a SQL assertion on the plan containing the index name.
-- Strangers receive 404 for private videos. Grantees receive 200. Revocation returns the stranger behavior.
+- Private-video metadata and comments return 404 for an anonymous client and for an authenticated user with no grant. An approved grantee receives 200. After revoke, that grantee receives 404. These are the stage 3 rows of [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.1. Playlist and segment rows wait for stage 6.
 - Unlisted videos are absent from the feed, related list, and public channel list, and present by id.
 - Changing visibility bumps `acl_version` and does not delete grants.
 - Cursor pagination does not skip or duplicate rows when a new video is inserted between pages. The test inserts a row with a published date between two pages and shows the cursor is stable.
@@ -167,18 +190,18 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Build:**
 
-- `upload_sessions`, quota reservation, multipart init, part presign, complete, abort.
-- Sweeper for expired sessions and `completing` repairs. The worker process starts running sweepers in this stage.
+- `upload_sessions` including `part_count`, `completion_token`, and nullable `minio_upload_id`. Quota reservation, multipart init, part presign with signed `Content-Length`, `ListParts` verification, complete, abort.
+- Sweeper for expired sessions, stale `completing` rows, and multipart uploads that have no session row. The worker process starts running sweepers in this stage.
+- `minio-init` applies the bucket policy, CORS, lifecycle, and bucket quota from [SECURITY_DESIGN.md](SECURITY_DESIGN.md).
 - Thumbnail and avatar re-encode.
 - Frontend upload screen: file picker, title and description, progress from completed parts, status text.
 - MinIO CORS and the public S3 host on Caddy.
 
 **Definition of done:**
 
-- A browser integration or an API test using the MinIO SDK uploads a small file through presigned part URLs and reaches `uploaded` with one queued job. The job is not executed until stage 5, so the test asserts the job row and then cancels it.
-- Quota reservation prevents two concurrent inits from exceeding the limit. The test uses two sessions and a limit that allows only one.
-- Abort and expiry release `bytes_reserved`.
-- Completing the same upload twice does not create two jobs.
+- A browser integration or an API test using the MinIO SDK uploads a small file through presigned part URLs, sending each part at the signed `content_length`, and reaches `uploaded` with one queued job. The job is not executed until stage 5, so the test asserts the job row and then cancels it.
+- The stage 4 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.3 pass: part-number rejection, oversized `PUT` rejected by MinIO, `ListParts` size mismatch, concurrent complete, duplicate complete, expired session, sweeper abort, quota lock, unsigned `PUT` denied, and bucket policy without a public principal.
+- Abort and expiry release `bytes_reserved` only after the multipart abort succeeds.
 - A thumbnail that is not an image is rejected, and a valid PNG is stored as JPEG without EXIF.
 - API logs for this test do not contain the presigned query string. The test scans captured logs.
 
@@ -214,10 +237,9 @@ The one-command claim applies to install and start. It does not apply to restore
 **Definition of done:**
 
 - Playwright or a scripted player loads the master playlist, a variant, and at least one segment redirect whose `Location` host is the configured S3 host.
-- A private video returns 404 on playback and on the segment route for a stranger.
-- After hide, the next segment request fails even if the playback cookie still exists.
-- After revoke, the grantee's next segment request fails.
-- Public, unlisted, owner, and grantee paths are each tested.
+- The stage 6 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.1 pass. That includes anonymous and unauthorized callers, an approved grantee, a revoked grant, expired and revoked playback sessions, a cookie presented to the wrong video, unsigned object `GET` returning 403, and playlist bodies that do not contain presigned query strings.
+- After hide, the next segment request fails even if the playback cookie still exists. The full hide and restore audit tests are stage 10.
+- Public, unlisted, owner, and grantee paths are each tested at both the playlist and the segment route.
 - iOS Safari, if a device or BrowserStack-equivalent is not available, is recorded as **not verified**. The fallback in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md) is not enabled on the basis of a guess. The stage notes say what was verified: desktop Chromium at minimum, plus Firefox if Playwright can run it.
 
 ### Stage 7 — Engagement
@@ -286,10 +308,7 @@ The one-command claim applies to install and start. It does not apply to restore
 **Definition of done:**
 
 - The security tests for roles, self-promotion, last-admin protection, and the audit trigger pass.
-- Hide removes the video from feed, search, and anonymous playback, and writes one audit row. A second hide does not write another.
-- A moderator can play a reported private video, and that play writes `view_private_video`.
-- A moderator cannot play a private video that was never reported and is not hidden.
-- A normal user receives 403 on moderation routes.
+- The stage 10 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.2 pass: moderator playback denied for a private video that was never reported, allowed and audited after a report, hide and restore at feed and segment level, no duplicate audit row on a second hide, and 403 for a normal user.
 - Deactivation increments epoch and stops refresh.
 
 ### Stage 11 — Hardening
@@ -309,7 +328,7 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Definition of done:**
 
-- The security test list in the security document is checked off in the test run, not by inspection.
+- Every row in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9 has a test result in this stage's run, including the private-video, playback, upload, and bucket rows from earlier stages. A missing row fails the stage.
 - Rate-limit tests assert 429 and `Retry-After` on login and upload initiate.
 - A ready dependency failure (Redis stopped) makes upload initiate return 503 rather than succeed without a limit.
 - Playwright completes the path above against Compose.
@@ -327,11 +346,13 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Definition of done:**
 
-- A clean Ubuntu machine with only the repository and a domain, or explicitly in demo mode, reaches `/health/ready` after one script invocation.
-- The script is safe to re-run: it does not rotate existing secrets and does not create a second admin.
-- Backup script produces a restorable `pg_dump`. One restore rehearsal is recorded.
+- A clean Ubuntu machine with only the repository and a domain, or explicitly in demo mode, reaches `/health/ready` after `bash deploy/ubuntu-up.sh`.
+- Each preflight failure in section 3.1 was exercised at least once and produced a `deploy: FAIL` line. The volume-protection case was exercised by hiding `pg_data` on a machine that already had `.env` and confirming the script refused to create a new volume.
+- A migration failure was exercised with a deliberately bad revision on a throwaway database. The script exited `deploy: FAIL migrate`, the API was not marked healthy, and the previous good revision was still present. That bad revision is not part of the product migrations.
+- The script is safe to re-run: it does not rotate existing secrets, does not create a second admin, and exits 0 when the stack is already ready.
+- `deploy/backup.sh` produces a dump that `pg_restore -l` can read, and a bucket mirror. One restore rehearsal into a scratch database and scratch bucket is recorded, as specified in section 3.3.
 - Swagger is reachable at `/docs`.
-- MinIO console and database ports are not reachable from the public interface. The rehearsal checks this with a port scan of the host's public address.
+- Ports 5432, 6379, 9000, and 9001 are not reachable on a public interface. The rehearsal checks this.
 
 ## 5. Recommended implementation sequence
 

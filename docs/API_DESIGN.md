@@ -78,12 +78,12 @@ Sort orders:
 | 401 | Missing or bad access token, epoch mismatch, bad login | `UNAUTHENTICATED`, `INVALID_CREDENTIALS` |
 | 403 | Authenticated but wrong role | `FORBIDDEN` |
 | 404 | Missing, or hidden by ACL | `VIDEO_NOT_FOUND`, `CHANNEL_NOT_FOUND`, `PLAYLIST_NOT_FOUND`, `COMMENT_NOT_FOUND` |
-| 409 | State conflict | `EMAIL_TAKEN`, `HANDLE_TAKEN`, `INVALID_STATE`, `ALREADY_REPORTED`, `VIDEO_NOT_READY` |
+| 409 | State conflict | `EMAIL_TAKEN`, `HANDLE_TAKEN`, `INVALID_STATE`, `ALREADY_REPORTED`, `VIDEO_NOT_READY`, `UPLOAD_IN_PROGRESS`, `UPLOAD_EXPIRED` |
 | 413 | Body too large | `PAYLOAD_TOO_LARGE` |
 | 415 | Thumbnail type rejected | `UNSUPPORTED_MEDIA_TYPE` |
-| 422 | Pydantic validation | `VALIDATION_ERROR` |
+| 422 | Pydantic or upload verification | `VALIDATION_ERROR`, `UPLOAD_PART_INVALID`, `UPLOAD_REJECTED` |
 | 429 | Rate limit | `RATE_LIMITED` |
-| 503 | Dependency down | `SERVICE_UNAVAILABLE` |
+| 503 | Dependency down | `SERVICE_UNAVAILABLE`, `STORAGE_UNAVAILABLE` |
 
 Private videos a caller cannot access use 404, not 403 (ADR-011). Role failures on moderation routes use 403 because the route itself is not secret.
 
@@ -171,9 +171,9 @@ Related-video selection is rule-based, not a ranked model. The response is a lis
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. Starts multipart upload. Returns `session_id`, `part_size`, `part_count`, `expires_at` |
-| POST | `/api/v1/videos/{id}/upload/parts` | owner | Body: `part_numbers`. Returns presigned PUT URLs and their expiry |
-| POST | `/api/v1/videos/{id}/upload/complete` | owner | Body: `parts: [{part_number, etag}]`. Completes upload and enqueues processing. Idempotent |
+| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. Reserves quota and starts multipart upload. Returns `session_id`, `part_size`, `part_count`, `expires_at`. `503 STORAGE_UNAVAILABLE` if MinIO does not create the upload. The reservation is released in that case |
+| POST | `/api/v1/videos/{id}/upload/parts` | owner | Body: `part_numbers`. Returns `{ "parts": [{ "part_number", "url", "content_length", "expires_at" }] }`. `content_length` is the exact signed length. Part numbers outside `1 .. part_count`, duplicates, and batches over 20 are `422 UPLOAD_PART_INVALID`. Expired sessions are `409 UPLOAD_EXPIRED` |
+| POST | `/api/v1/videos/{id}/upload/complete` | owner | Body: `parts: [{part_number, etag}]`. Verifies `ListParts` and `HEAD` against `expected_size`, then enqueues processing. A finished session returns the current video. A concurrent second caller receives `409 UPLOAD_IN_PROGRESS` and `Retry-After: 5`. A size or part mismatch is `422 UPLOAD_REJECTED` and creates no job. A MinIO outage before the upload is finalized is `503 STORAGE_UNAVAILABLE` and leaves the session retryable |
 | POST | `/api/v1/videos/{id}/upload/abort` | owner | Abort and release quota reservation. `204` |
 | PUT | `/api/v1/videos/{id}/thumbnail` | owner | Raw image body or multipart file. Re-encoded and stored. Limit 2 MB |
 | DELETE | `/api/v1/videos/{id}/thumbnail` | owner | Removes the custom thumbnail. Auto thumbnail remains. `204` |
@@ -302,7 +302,7 @@ Playback cookie routes are listed in section 2.5. They reject a bearer token tha
 
 | Call | Repeat behavior |
 | --- | --- |
-| Complete upload | 200 with the current video if already completed |
+| Complete upload | 200 with the current video if already completed. In-flight duplicate is `409 UPLOAD_IN_PROGRESS`. A rejected upload is not retried through this route |
 | Subscribe / unsubscribe | 204 if the end state is already true |
 | Hide / restore | 200 with current moderation state, no second audit row |
 | Reaction `like` when already `like` | 200, counts unchanged |
@@ -322,7 +322,9 @@ OpenAPI is generated from the route models. Hand-written YAML is not a second so
 ## 6. What the API will not do
 
 - Receive original video bytes.
-- Return MinIO credentials.
+- Return MinIO application credentials or MinIO root credentials.
+- Sign an upload part without a fixed `Content-Length`.
+- Accept a complete body as proof of object size. `ListParts` and `HEAD` are the proof.
 - Accept a role on registration.
 - List private videos of other users.
 - Serve a segment body through the API process.
