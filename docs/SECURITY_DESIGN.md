@@ -14,9 +14,9 @@ Canonical decisions: ADR-003, ADR-004, ADR-005, ADR-011, ADR-012, ADR-013, ADR-0
 | Caddy on the public internet | Terminates TLS. Does not make authorization decisions |
 | FastAPI | Trusted to enforce identity, ACL, quota, and roles |
 | Worker | Trusted with object-storage credentials and FFmpeg. Not reachable from the network |
-| PostgreSQL, Redis, MinIO | Private Docker network only. No published ports |
-| MinIO application credentials | API and worker environment only. Never in the frontend bundle, never in presigned URLs as raw keys, never in logs |
-| MinIO root credentials | MinIO server process and the one-shot init container only. The API refuses to start if it sees them |
+| PostgreSQL, Redis, SeaweedFS | Private Docker network only. No published ports |
+| S3 application credentials | API and worker environment only. Never in the frontend bundle, never in presigned URLs as raw keys, never in logs |
+| storage admin credentials | SeaweedFS server process and the one-shot init container only. The API refuses to start if it sees them |
 
 Presigned URLs are capabilities. They are created only after the API has authorized the action, they are scoped to one object and one method, and they expire quickly.
 
@@ -143,7 +143,7 @@ Authorization state lives in PostgreSQL. Object storage does not have a parallel
 
 Upload presigns are `PUT` for one part of one upload id. They expire in 20 minutes. A presign for video A's upload cannot write video B's key because the key and upload id are bound into the signature.
 
-If the database says a video is deleted and MinIO still has bytes, the bytes are unreachable because no route will presign them and the bucket is private. The sweeper removes them.
+If the database says a video is deleted and SeaweedFS still has bytes, the bytes are unreachable because no route will presign them and the bucket is private. The sweeper removes them.
 
 ## 4. Upload and file validation
 
@@ -155,16 +155,16 @@ Validation is layered. Any single layer can be bypassed by a crafted client, so 
 | Metadata | Create and initiate | Length limits, tag grammar, visibility enum |
 | Declared type | Initiate | Allow-list of video content types |
 | Size | Initiate | `1 .. MAX_UPLOAD_BYTES` |
-| Quota reservation | Initiate | Row lock, reserve `expected_size` before MinIO accepts parts |
+| Quota reservation | Initiate | Row lock, reserve `expected_size` before SeaweedFS accepts parts |
 | Concurrency | Initiate | Cap active sessions per user |
 | Rate limit | Initiate | 10 per hour per user, 30 per hour per IP |
 | Part scope | Presign | Only part numbers that belong to this session, batch size ≤ 20 |
 | Part numbers | Presign and complete | Integers, unique, only `1 .. part_count`, batch ≤ 20, and `part_count` ≤ 512 |
-| Part length | Presign | SigV4 signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder. MinIO rejects any other length |
+| Part length | Presign | SigV4 signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder. SeaweedFS rejects any other length |
 | Stored parts | Complete | `ListParts` must be exactly those part numbers and sizes. Client ETags must match. Sum must equal `expected_size` with no tolerance |
 | Object size | Complete | `HEAD` `Content-Length` must equal `expected_size` |
 | Duplicate and concurrent complete | Complete | A finished session returns the current video. A second in-flight caller receives `409 UPLOAD_IN_PROGRESS` |
-| Expiry and abandon | Sweeper and lifecycle | API refuses expired sessions. Sweeper aborts them. MinIO lifecycle aborts incomplete multipart uploads after 1 day |
+| Expiry and abandon | Sweeper and lifecycle | API refuses expired sessions. Sweeper aborts them. SeaweedFS lifecycle aborts incomplete multipart uploads after 1 day |
 | Media probe | Worker | Real container, at least one video stream, duration and dimension caps |
 | FFmpeg sandbox | Worker | Non-root user, `-protocol_whitelist file,pipe`, `-nostdin`, process-group timeout, no network needed |
 | Thumbnail and avatar | API | Size cap, decode with Pillow, dimension cap, re-encode to JPEG, metadata stripped |
@@ -175,68 +175,36 @@ A polyglot file that is a valid video and also contains another payload is store
 
 Image uploads are re-encoded so the stored thumbnail is not the original file. This removes EXIF and most content smuggled past a MIME check (ADR-023).
 
-Quota and reservation details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md) and ADR-025. The split between API checks and MinIO checks is in that document, section 3.7. The rule that matters here: a presigned part URL cannot store more bytes than the length in its signature, and that length was reserved against the user quota before the URL existed.
+Quota and reservation details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md) and ADR-025. The split between API checks and SeaweedFS checks is in that document, section 3.7. The rule that matters here: a presigned part URL cannot store more bytes than the length in its signature, and that length was reserved against the user quota before the URL existed.
 
 ## 5. Object storage
 
-MinIO is private infrastructure. The browser talks to the public S3 hostname only with URLs the API has just signed. Administrative credentials never reach the browser, the OpenAPI examples, or the API process.
+SeaweedFS is private infrastructure. Its S3 gateway is the only storage API the application uses. The browser talks to the public S3 hostname only with URLs the API has just signed. Administrative credentials never reach the browser, the OpenAPI examples, or the API process.
 
 ### 5.1 Network
 
 | Path | Exposure |
 | --- | --- |
-| `minio:9000` | Docker network only. Compose does not publish 9000 or 9001 |
-| MinIO console | Disabled with `MINIO_BROWSER=off` |
-| `https://s3.<domain>` | Caddy site that reverse-proxies to `minio:9000` and preserves `Host` |
-| API and worker | Use `MINIO_ENDPOINT=http://minio:9000` for `ListParts`, `HEAD`, complete, abort, and server-side reads. They do not use the public URL for those calls |
+| `seaweedfs:8333` | S3 gateway on the Docker network. Compose does not publish it |
+| Master `9333`, volume `8080`, filer `8888` | Bound to loopback inside the SeaweedFS container. Filer HTTP is disabled. No admin UI is published |
+| `https://s3.<domain>` | Caddy site that reverse-proxies to `seaweedfs:8333` and preserves `Host` |
+| API and worker | Use `S3_ENDPOINT_URL=http://seaweedfs:8333` for `ListParts`, `HEAD`, complete, abort, and server-side reads. They do not use the public URL for those calls |
 
-Startup of the API process checks three things and exits if any fail: the bucket exists, the bucket policy matches the document in section 5.2, and `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` are absent from the API environment. Readiness uses the application credentials to confirm the bucket is reachable. It does not use root credentials.
+Startup of the API process checks three things and exits if any fail: the bucket exists, an anonymous `GetObject` of a probe object is rejected, and `S3_ADMIN_ACCESS_KEY` / `S3_ADMIN_SECRET_KEY` are absent from the API environment. Readiness uses the application credentials to confirm the bucket is reachable. It does not use the storage-admin identity.
 
-### 5.2 Bucket policy
+### 5.2 Identities and bucket policy
 
-The init container applies this policy to bucket `media`. There is no statement whose principal is `*`, and there is no `s3:*`.
+SeaweedFS authorizes S3 calls from an identity file loaded only by the storage process. Anonymous has no actions. `media-app` is limited to bucket `media`: `Read`, `Write`, `List`, `Tagging`, `ListBucketMultipartUploads`, and `ListMultipartUploadParts`. The storage-admin identity can create the bucket, set CORS, set the lifecycle rule, and set the bucket quota. `media-app` cannot.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AppObjectAccess",
-      "Effect": "Allow",
-      "Principal": { "AWS": ["arn:aws:iam::minio:user/media-app"] },
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:AbortMultipartUpload",
-        "s3:ListMultipartUploadParts"
-      ],
-      "Resource": ["arn:aws:s3:::media/*"]
-    },
-    {
-      "Sid": "AppBucketList",
-      "Effect": "Allow",
-      "Principal": { "AWS": ["arn:aws:iam::minio:user/media-app"] },
-      "Action": [
-        "s3:ListBucket",
-        "s3:ListBucketMultipartUploads",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": ["arn:aws:s3:::media"]
-    }
-  ]
-}
-```
+Init does not install a bucket policy whose principal is `*`. If a bucket policy is present and an `Allow` statement uses principal `*` or action `s3:*`, API startup fails. Anonymous access is rejected even when no bucket policy document is stored, because the anonymous identity has an empty action list.
 
-Anything else is denied, including anonymous `GetObject` and `PutObject`. The application never calls an anonymous or public-read setting. A policy fetch that contains `Principal` `*` or `Action` `s3:*` is a startup failure.
-
-A hard bucket quota, `MINIO_BUCKET_QUOTA_BYTES`, is set by the same init. It limits total disk use if an application bug signs a bad URL. It does not replace per-user reservations.
+A hard bucket quota, `S3_BUCKET_QUOTA_BYTES`, is set by init with the SeaweedFS `?seaweedfs-quota` subresource. It limits total disk use if an application bug signs a bad URL. It does not replace per-user reservations. The application identity cannot read or change that quota.
 
 Lifecycle: abort incomplete multipart uploads after 1 day. Objects are not expired by lifecycle. Deletion of a video's prefixes is the sweeper's job.
 
 ### 5.3 CORS
 
-CORS is set on the bucket and answered by MinIO through the S3 host. One origin. Credentials are off. The browser does not send cookies to `s3.<domain>`.
+CORS is set on the bucket and answered by the S3 gateway. One origin. Credentials are off. The browser does not send cookies to `s3.<domain>`. The gateway `-s3.allowedOrigins` value is the same origin, so it does not add `*`.
 
 | Field | Value |
 | --- | --- |
@@ -256,7 +224,7 @@ CORS is set on the bucket and answered by MinIO through the S3 host. One origin.
 | Segment after an authorized segment request | `GET` | `PLAYBACK_SEGMENT_TTL_SECONDS` (120) | One object key |
 | Thumbnail embedded in JSON | `GET` | 120 seconds | One thumbnail key |
 
-All three use SigV4 and `S3_PUBLIC_BASE_URL`. None of them are prefix wildcards. Upload URLs are not valid as `GET`. Segment URLs are not valid as `PUT`.
+All three use SigV4 and `S3_PUBLIC_ENDPOINT_URL`. None of them are prefix wildcards. Upload URLs are not valid as `GET`. Segment URLs are not valid as `PUT`.
 
 ### 5.5 Hostname
 
@@ -264,39 +232,38 @@ TLS mode requires all of these to agree, and `ubuntu-up.sh` refuses to start if 
 
 - `PUBLIC_DOMAIN=example.com`
 - `PUBLIC_APP_URL=https://example.com`
-- `S3_PUBLIC_BASE_URL=https://s3.example.com`
+- `S3_PUBLIC_ENDPOINT_URL=https://s3.example.com`
 - `CORS_ORIGINS=https://example.com`
 - Caddy site label `s3.example.com`
-- `MINIO_DOMAIN=s3.example.com`
 
-Addressing is path-style: `https://s3.example.com/media/originals/{video_id}/source`. The presigner and Caddy must use that host so the signature matches the `Host` header MinIO sees. Demo HTTP mode uses `http://s3.localhost` only on a loopback deploy and prints that it is not a production configuration.
+Addressing is path-style: `https://s3.example.com/media/originals/{video_id}/source`. The presigner and Caddy must use that host so the signature matches the `Host` header the S3 gateway sees. Demo HTTP mode uses `http://s3.localhost` only on a loopback deploy and prints that it is not a production configuration.
 
 ### 5.6 Credentials
 
 | Secret | Who receives it |
 | --- | --- |
-| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | `minio` service and `minio-init` only. Stored in `/opt/youtube-clone/.env.minio-root`, mode 600 |
-| `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | `media-app` user created by init. API and worker only. Stored in `.env`, mode 600 |
+| `S3_ADMIN_ACCESS_KEY`, `S3_ADMIN_SECRET_KEY` | SeaweedFS server and `s3-init` only. Stored in `/opt/youtube-clone/.env.seaweed-admin`, mode 600 |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | `media-app` identity. API and worker only. Also present in the SeaweedFS identity file so the gateway can verify signatures. Stored in `.env`, mode 600 |
 
-Init creates `media-app` if it does not exist, attaches the policy above, and does not print the secret. Re-running init does not rotate the secret. The API, worker, edge, and frontend services do not use `env_file` for the root file. Their Compose `environment` lists the variables they are allowed to see. If root variables are present in the API process, the process exits before it listens.
+Init is safe to run again and does not rotate `media-app`. The API, worker, edge, and frontend services do not use `env_file` for the admin file. If admin variables are present in the API process, the process exits before it listens.
 
 Rotation is an operator procedure: create a new access key, restart API and worker, then disable the old key. The first release does not rotate automatically.
 
-### 5.7 When MinIO is unavailable
+### 5.7 When object storage is unavailable
 
 | Operation | Behavior |
 | --- | --- |
 | Initiate, after the reservation is committed, if `CreateMultipartUpload` fails | Release the reservation, mark the session `aborted`, return the video to `draft`, `503 STORAGE_UNAVAILABLE` |
-| Presign | Does not call MinIO. If the last readiness snapshot says MinIO is down, still return `503` so the client does not receive URLs that cannot be stored. The snapshot is the ready check's MinIO result, refreshed at least every 10 seconds |
+| Presign | Does not call SeaweedFS. If the last readiness snapshot says SeaweedFS is down, still return `503` so the client does not receive URLs that cannot be stored. The snapshot is the ready check's SeaweedFS result, refreshed at least every 10 seconds |
 | Complete, network error before `CompleteMultipartUpload` | `503 STORAGE_UNAVAILABLE`. Session returns to `initiated`. No job is inserted |
 | Complete, network error after `CompleteMultipartUpload` was attempted | `HEAD` decides. A verified object is finalized. A missing object returns the session to `initiated`. If `HEAD` fails too, the session stays `completing` and a retry receives `409` until the lock window passes |
 | Complete, verification rejection | Abort as in the pipeline document. This is a client error, not an outage |
 | Playlist read | `503 STORAGE_UNAVAILABLE` |
-| Segment redirect | The ACL check does not need MinIO. Signing a URL does not either. If MinIO was down at the last probe, return `503` instead of a URL that will fail in the player |
+| Segment redirect | The ACL check does not need SeaweedFS. Signing a URL does not either. If SeaweedFS was down at the last probe, return `503` instead of a URL that will fail in the player |
 | Worker download or artifact upload | Retryable `storage_error` |
-| Readiness | `503` with `checks.minio=fail` |
+| Readiness | `503` with `checks.s3=fail` |
 
-The API does not fall back to a public URL or skip the ACL when MinIO is down.
+The API does not fall back to a public URL or skip the ACL when SeaweedFS is down.
 
 ## 6. Rate limiting
 
@@ -330,8 +297,8 @@ Responses use `429` and `Retry-After`. The error code is `RATE_LIMITED`.
 | XSS | React default escaping. Comments and descriptions are plain text. `Content-Type: application/json` on API responses. CSP on the frontend: default-src `'self'`; media and connect allowed to `self` and `s3.<domain>`; no inline scripts. The Vite build uses hashed assets without inline handlers |
 | CSRF | Bearer token for mutations. `SameSite=Lax` cookies. No cookie-authenticated mutations except refresh, which is Lax-protected |
 | Clickjacking | `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` |
-| MIME sniffing | `X-Content-Type-Options: nosniff`. Thumbnails served as `image/jpeg` from MinIO after re-encode |
-| Open redirect | The segment endpoint redirects only to a URL this process just presigned on `S3_PUBLIC_BASE_URL`. The `Location` host is checked against that configured host before the response is sent |
+| MIME sniffing | `X-Content-Type-Options: nosniff`. Thumbnails served as `image/jpeg` from SeaweedFS after re-encode |
+| Open redirect | The segment endpoint redirects only to a URL this process just presigned on `S3_PUBLIC_ENDPOINT_URL`. The `Location` host is checked against that configured host before the response is sent |
 | SSRF | The server does not fetch user-supplied URLs. FFmpeg cannot open network protocols |
 | IDOR | Every object load goes through the ACL or an owner check. UUID v7 identifiers are not authorization |
 | Mass assignment | Pydantic request models list fields explicitly. `role`, `subscriber_count`, `view_count`, and processing fields are not accepted from clients |
@@ -375,13 +342,13 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 | S, same five calls | 404 on every one | 3 and 6 |
 | G metadata and comments | 200 | 3 |
 | G `POST` playback, then master and variant playlists with the session cookie | 200. Playlist bodies contain no `X-Amz-Algorithm` and no `X-Amz-Signature` | 6 |
-| G segment route | 302. `Location` host is `S3_PUBLIC_BASE_URL`. Path is that segment key only | 6 |
+| G segment route | 302. `Location` host is `S3_PUBLIC_ENDPOINT_URL`. Path is that segment key only | 6 |
 | Owner revokes G. G repeats metadata, playlist, and segment, including the cookie from before the revoke | 404. The playback session row has `revoked_at` set | 3 and 6 |
 | Session `expires_at` set in the past. Playlist and segment with that cookie | 404 | 6 |
 | Session `revoked_at` set directly. Playlist and segment | 404 | 6 |
 | Cookie issued for this video is sent by the test client to a different video's segment route | 404. The session's `video_id` does not match the path | 6 |
-| Unsigned `GET` of `originals/{id}/source` and of an HLS segment key, no query string | 403 from MinIO | 6 |
-| Detail JSON and playlist body for G | Do not contain `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_ROOT_USER`, or `MINIO_ROOT_PASSWORD` | 6 |
+| Unsigned `GET` of `originals/{id}/source` and of an HLS segment key, no query string | 403 from SeaweedFS | 6 |
+| Detail JSON and playlist body for G | Do not contain `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ADMIN_ACCESS_KEY`, or `S3_ADMIN_SECRET_KEY` | 6 |
 | API log lines captured during G's playback | Do not contain `X-Amz-Signature` or `X-Amz-Credential` | 6 |
 
 ### 9.2 Moderation of private and hidden videos
@@ -403,7 +370,7 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 | --- | --- | --- |
 | Part numbers `0`, `-1`, `part_count + 1`, a duplicate, and a batch of 21 | 422 `UPLOAD_PART_INVALID`. No URL in the body | 4 |
 | Presign for another user's video | 404 | 4 |
-| `PUT` with `Content-Length` larger than the signed length | MinIO 403. `ListParts` does not show that part | 4 |
+| `PUT` with `Content-Length` larger than the signed length | SeaweedFS 403. `ListParts` does not show that part | 4 |
 | Complete when a part size does not match the signed length | 422 `UPLOAD_REJECTED`, no job, reservation released only after abort, video `failed` | 4 |
 | Two concurrent complete calls | One success, one `409 UPLOAD_IN_PROGRESS` or a second 200 after the first commits. Exactly one job | 4 |
 | Complete repeated after success | 200 and still one job | 4 |
@@ -412,7 +379,7 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 | Two inits that together exceed the quota | One succeeds, one is rejected, `bytes_reserved + bytes_committed` never exceeds `bytes_limit` | 4 |
 | Unsigned `PUT` to the bucket | 403 | 4 |
 | Bucket policy document | No `Principal` `*` and no `s3:*`. API startup check covers the same assertion | 4 |
-| API process environment in the test stack | Does not include `MINIO_ROOT_PASSWORD` | 1 |
+| API process environment in the test stack | Does not include `S3_ADMIN_SECRET_KEY` | 1 |
 
 ### 9.4 Other controls
 
@@ -422,7 +389,7 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 - Reuse of a rotated refresh token revokes the family. Stage 2.
 - A non-video payload that passes the content-type allow-list is marked `failed` with `invalid_media` and never becomes `ready`. Stage 5.
 - The moderation audit trigger rejects `UPDATE` and `DELETE`. Stage 10.
-- Segment redirect `Location` host equals `S3_PUBLIC_BASE_URL`. A unit test of the host check rejects any other host. Stage 6.
+- Segment redirect `Location` host equals `S3_PUBLIC_ENDPOINT_URL`. A unit test of the host check rejects any other host. Stage 6.
 
 ## 10. Residual risk
 
@@ -431,5 +398,5 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 - FFmpeg and Pillow can have memory-corruption bugs. Isolation is non-root, no published port, protocol whitelist, and timeouts. It is not a sandbox such as gVisor. That extra sandbox is out of scope on a single Docker host unless the operator adds it later.
 - One server is a single point of compromise. Disk encryption and host hardening are operator responsibilities. The application design does not replace them.
 - There is no email verification, so disposable accounts can upload until quotas and rate limits stop them.
-- MinIO still has root credentials in the `minio` process, because the server will not boot without them. Those values are not in the API, worker, edge, or frontend environment. A person who can read the MinIO container environment can administer the bucket.
+- The SeaweedFS process holds the storage-admin identity because the S3 gateway has to load it. Those values are not in the API, worker, edge, or frontend environment. A person who can read that container environment can administer the bucket.
 - If a future change signs part URLs without `Content-Length`, a client can store parts larger than the reservation until the sweeper aborts them. The stage 4 oversized-`PUT` test is what keeps that regression visible. The bucket quota limits the damage and does not make the bug acceptable.

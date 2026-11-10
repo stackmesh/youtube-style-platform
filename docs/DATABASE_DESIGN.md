@@ -244,7 +244,7 @@ A check constraint rejects `grantee_user_id = granted_by_user_id` only when that
 | `id` | uuid PK | |
 | `video_id` | uuid | FK `videos.id`, not null |
 | `object_key` | text | not null. Always `originals/{video_id}/source` |
-| `minio_upload_id` | text | null until `CreateMultipartUpload` returns |
+| `s3_upload_id` | text | null until `CreateMultipartUpload` returns |
 | `expected_size` | bigint | not null, check `> 0` |
 | `part_size` | integer | not null, check `= 16777216` |
 | `part_count` | integer | not null, check between 1 and 512 |
@@ -274,12 +274,12 @@ CREATE UNIQUE INDEX upload_sessions_one_active_uidx
 ```
 
 ```sql
-CREATE UNIQUE INDEX upload_sessions_minio_upload_uidx
-  ON upload_sessions (minio_upload_id)
-  WHERE minio_upload_id IS NOT NULL;
+CREATE UNIQUE INDEX upload_sessions_s3_upload_uidx
+  ON upload_sessions (s3_upload_id)
+  WHERE s3_upload_id IS NOT NULL;
 ```
 
-Completion locks this row with `FOR UPDATE`. Two overlapping complete calls serialize on that lock. The details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Quota is released only after MinIO has aborted the upload or the object is confirmed gone, except the success path, which moves `expected_size` from `bytes_reserved` to `bytes_committed` after `HEAD` matches exactly.
+Completion locks this row with `FOR UPDATE`. Two overlapping complete calls serialize on that lock. The details are in [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Quota is released only after SeaweedFS has aborted the upload or the object is confirmed gone, except the success path, which moves `expected_size` from `bytes_reserved` to `bytes_committed` after `HEAD` matches exactly.
 
 ### 3.10 `video_processing_jobs`
 
@@ -506,10 +506,10 @@ Feed and search queries must be checked with `EXPLAIN` during the catalogue stag
 | Unsubscribe | Delete subscription, decrement count, guarded so the count cannot go negative |
 | Set reaction | Upsert or delete reaction, adjust `like_count` and `dislike_count` with a single `UPDATE` |
 | Add comment | Insert comment, increment `comment_count` |
-| Begin upload | Lock quota, reserve `expected_size`, insert session. `CreateMultipartUpload` happens after this commit. A follow-up transaction stores `minio_upload_id` |
+| Begin upload | Lock quota, reserve `expected_size`, insert session. `CreateMultipartUpload` happens after this commit. A follow-up transaction stores `s3_upload_id` |
 | Start complete | Lock the session. One caller sets `completing` and `completion_token`. A caller that finds `completed` returns the current video. A caller that finds a recent `completing` row receives `UPLOAD_IN_PROGRESS` |
 | Finish complete | After `ListParts` and `HEAD` match `expected_size`: session `completed`, move reservation to `bytes_committed`, video `uploaded`, insert one job |
-| Reject complete | After MinIO abort succeeds: session `aborted`, reservation released, video `failed`, `error_code = upload_rejected`. No job. If abort fails, the reservation stays and the sweeper retries |
+| Reject complete | After SeaweedFS abort succeeds: session `aborted`, reservation released, video `failed`, `error_code = upload_rejected`. No job. If abort fails, the reservation stays and the sweeper retries |
 | Finalize job | Set job `succeeded`, set video `ready`, set media keys, set `published_at` if null |
 | Hide video | Set `hidden`, increment `acl_version`, resolve targeted reports, insert audit |
 | Change role | Update `users.role` and insert the audit row. Sessions stay valid. The next request reads the new role |

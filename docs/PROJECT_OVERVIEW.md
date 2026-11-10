@@ -108,11 +108,11 @@ The browser uploads the file directly to object storage with presigned multipart
 
 ### 2.7 Video infrastructure
 
-- Private S3-compatible object storage (MinIO).
+- Private S3-compatible object storage (SeaweedFS).
 - Originals, HLS playlists, HLS segments, and thumbnails are stored as objects, never as PostgreSQL bytea.
 - A background worker runs FFmpeg to validate the file, extract a thumbnail, and build HLS renditions.
 - The worker records status, retries retryable failures, and stops on fatal media errors.
-- Viewers receive HLS through the application. Segment bytes are delivered from MinIO using short-lived presigned URLs.
+- Viewers receive HLS through the application. Segment bytes are delivered from SeaweedFS using short-lived presigned URLs.
 
 ### 2.8 Privacy
 
@@ -151,7 +151,7 @@ The API enforces roles. The frontend hides controls only as a convenience.
 ### Security
 
 - Passwords hashed with Argon2id.
-- Private buckets. MinIO credentials never leave the server.
+- Private buckets. SeaweedFS credentials never leave the server.
 - Private and unlisted playback authorized on the server.
 - Upload size, type, duration, quota, and rate limits enforced on the server. Each presigned part URL is bound to one exact length, so it cannot store more than the reserved quota.
 - Privileged actions audited and append-only.
@@ -162,7 +162,7 @@ The API enforces roles. The frontend hides controls only as a convenience.
 - Processing jobs are idempotent and claimed transactionally.
 - A sweeper repairs uploads that completed in object storage but never queued a job, and jobs whose worker lock expired.
 - Incomplete multipart uploads expire.
-- Containers restart unless stopped. Health checks cover the API, database, Redis, MinIO, and worker heartbeat.
+- Containers restart unless stopped. Health checks cover the API, database, Redis, SeaweedFS, and worker heartbeat.
 
 ### Maintainability
 
@@ -177,7 +177,7 @@ The API enforces roles. The frontend hides controls only as a convenience.
 - One command on a clean Ubuntu host: `bash deploy/ubuntu-up.sh`. The script checks the OS, Docker, free disk, and environment, refuses to delete volumes, and exits with a `deploy: FAIL` line when startup or migration does not become healthy.
 - Configuration by environment variables.
 - JSON logs with a request id.
-- Persistent volumes for PostgreSQL, Redis, MinIO, and transcode scratch space.
+- Persistent volumes for PostgreSQL, Redis, SeaweedFS, and transcode scratch space.
 
 ### Testability
 

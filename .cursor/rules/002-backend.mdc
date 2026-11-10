@@ -1,0 +1,14 @@
+---
+description: FastAPI, service boundaries, and error handling
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Backend
+
+- Build the app in `create_app()`. Routes receive dependencies through FastAPI `Depends`.
+- Use SQLAlchemy 2 style (`select`, `Session`, `Mapped`). Keep tables in models, SQL in repositories, rules in services, and HTTP in `app/api`.
+- Validate request and response bodies with Pydantic v2 models.
+- The API process is async. Blocking client calls go through `asyncio.to_thread`. The worker process stays synchronous.
+- Raise `AppError` for expected failures. The shared handler returns `{"error": {"code", "message", "details", "request_id"}}`. Do not return stack traces or connection strings to clients.
+- Do not add a second job queue. Processing jobs belong in PostgreSQL when that stage starts.

@@ -1,6 +1,6 @@
 # API Design
 
-**Status: design only. No routes are implemented.**
+**Status: design for product routes. Stage 1 implements `/health/live` and `/health/ready` only.**
 
 The HTTP API is the only interface the frontend and the test suite use. Base path: `/api/v1`. Interactive documentation is FastAPI's Swagger UI at `/docs`, backed by `/openapi.json`. ReDoc is at `/redoc`.
 
@@ -127,7 +127,7 @@ Avatar URLs are public API redirects. Avatars are not secret.
 | GET | `/health/live` | public | Process is up |
 | GET | `/health/ready` | public | Database, Redis, bucket, worker heartbeat |
 
-These are on the public internet. They return status names and nothing else: no versions of internal hosts, no credentials. Ready failure is a 503 with `{"status":"not_ready","checks":{"postgres":"ok","redis":"fail","minio":"ok","worker":"ok"}}`.
+These are on the public internet. They return status names and nothing else: no versions of internal hosts, no credentials. Ready failure is a 503 with `{"status":"not_ready","checks":{"postgres":"ok","redis":"fail","s3":"ok","worker":"ok"}}`.
 
 ### 2.2 Identity
 
@@ -171,9 +171,9 @@ Related-video selection is rule-based, not a ranked model. The response is a lis
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. Reserves quota and starts multipart upload. Returns `session_id`, `part_size`, `part_count`, `expires_at`. `503 STORAGE_UNAVAILABLE` if MinIO does not create the upload. The reservation is released in that case |
+| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. Reserves quota and starts multipart upload. Returns `session_id`, `part_size`, `part_count`, `expires_at`. `503 STORAGE_UNAVAILABLE` if SeaweedFS does not create the upload. The reservation is released in that case |
 | POST | `/api/v1/videos/{id}/upload/parts` | owner | Body: `part_numbers`. Returns `{ "parts": [{ "part_number", "url", "content_length", "expires_at" }] }`. `content_length` is the exact signed length. Part numbers outside `1 .. part_count`, duplicates, and batches over 20 are `422 UPLOAD_PART_INVALID`. Expired sessions are `409 UPLOAD_EXPIRED` |
-| POST | `/api/v1/videos/{id}/upload/complete` | owner | Body: `parts: [{part_number, etag}]`. Verifies `ListParts` and `HEAD` against `expected_size`, then enqueues processing. A finished session returns the current video. A concurrent second caller receives `409 UPLOAD_IN_PROGRESS` and `Retry-After: 5`. A size or part mismatch is `422 UPLOAD_REJECTED` and creates no job. A MinIO outage before the upload is finalized is `503 STORAGE_UNAVAILABLE` and leaves the session retryable |
+| POST | `/api/v1/videos/{id}/upload/complete` | owner | Body: `parts: [{part_number, etag}]`. Verifies `ListParts` and `HEAD` against `expected_size`, then enqueues processing. A finished session returns the current video. A concurrent second caller receives `409 UPLOAD_IN_PROGRESS` and `Retry-After: 5`. A size or part mismatch is `422 UPLOAD_REJECTED` and creates no job. A SeaweedFS outage before the upload is finalized is `503 STORAGE_UNAVAILABLE` and leaves the session retryable |
 | POST | `/api/v1/videos/{id}/upload/abort` | owner | Abort and release quota reservation. `204` |
 | PUT | `/api/v1/videos/{id}/thumbnail` | owner | Raw image body or multipart file. Re-encoded and stored. Limit 2 MB |
 | DELETE | `/api/v1/videos/{id}/thumbnail` | owner | Removes the custom thumbnail. Auto thumbnail remains. `204` |
@@ -322,7 +322,7 @@ OpenAPI is generated from the route models. Hand-written YAML is not a second so
 ## 6. What the API will not do
 
 - Receive original video bytes.
-- Return MinIO application credentials or MinIO root credentials.
+- Return S3 application credentials or storage admin credentials.
 - Sign an upload part without a fixed `Content-Length`.
 - Accept a complete body as proof of object size. `ListParts` and `HEAD` are the proof.
 - Accept a role on registration.

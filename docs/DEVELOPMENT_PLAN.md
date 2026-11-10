@@ -90,22 +90,22 @@ The script prints `deploy: OK <url>` or `deploy: FAIL <code>: <what failed>. <wh
 | Filesystem that will hold `/var/lib/docker` and `/opt/youtube-clone` has at least 20 GiB free on first install, and at least 2 GiB free on a repeat run | `deploy: FAIL disk` |
 | `MemTotal` is at least 2 GiB. Below 4 GiB the script prints a warning and continues | `deploy: FAIL memory` only under 2 GiB |
 | `docker info` works and `docker compose version` is v2. If Docker is missing, install Docker Engine and the Compose plugin from Docker's apt repository, then run `docker info` again | `deploy: FAIL docker` |
-| `.env` mode is `600`. Required keys exist. `JWT_SECRET` is at least 32 bytes. `MAX_UPLOAD_BYTES` is between 1 and `PART_SIZE_BYTES * MAX_PARTS`. `CORS_ORIGINS` equals `PUBLIC_APP_URL`. In TLS mode, `PUBLIC_DOMAIN` is set, `PUBLIC_APP_URL` is `https://` that domain, and `S3_PUBLIC_BASE_URL` is `https://s3.` that domain. `COOKIE_SECURE=true` in TLS mode and `false` only when `DEMO_HTTP=1` | `deploy: FAIL env` |
-| API and worker service definitions do not receive `MINIO_ROOT_USER` or `MINIO_ROOT_PASSWORD`. Those live only in `.env.minio-root` | `deploy: FAIL env` |
+| `.env` mode is `600`. Required keys exist. `JWT_SECRET` is at least 32 bytes. `MAX_UPLOAD_BYTES` is between 1 and `PART_SIZE_BYTES * MAX_PARTS`. `CORS_ORIGINS` equals `PUBLIC_APP_URL`. In TLS mode, `PUBLIC_DOMAIN` is set, `PUBLIC_APP_URL` is `https://` that domain, and `S3_PUBLIC_ENDPOINT_URL` is `https://s3.` that domain. `COOKIE_SECURE=true` in TLS mode and `false` only when `DEMO_HTTP=1` | `deploy: FAIL env` |
+| API and worker service definitions do not receive `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY`. Those live only in `.env.seaweed-admin` | `deploy: FAIL env` |
 
 If `.env` is missing, the script generates it and the root file, mode 600, and continues. If `.env` exists, it does not replace secrets.
 
 ### 3.2 Volumes, order, migrations, health
 
-Persistent volumes `pg_data`, `redis_data`, and `minio_data` are created on first install. The script never runs `docker compose down -v` and never removes those volumes. If `.env` already existed and one of those volumes is missing, it stops with `deploy: FAIL volume` and tells the operator to restore the volume. Recreating an empty database over an existing configuration requires moving `.env` aside on purpose. `work_data` may be recreated; the script prints that scratch files will be lost.
+Persistent volumes `pg_data`, `redis_data`, and `seaweed_data` are created on first install. The script never runs `docker compose down -v` and never removes those volumes. If `.env` already existed and one of those volumes is missing, it stops with `deploy: FAIL volume` and tells the operator to restore the volume. Recreating an empty database over an existing configuration requires moving `.env` aside on purpose. `work_data` may be recreated; the script prints that scratch files will be lost.
 
-Startup order is the table in [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md): postgres, redis, and minio, then `minio-init`, then api (migrate, then listen), then worker, then edge. `depends_on` uses `service_healthy` and, for init, `service_completed_successfully`.
+Startup order is the table in [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md): postgres, redis, and seaweedfs, then `s3-init`, then api (migrate, then listen), then worker, then edge. `depends_on` uses `service_healthy` and, for init, `service_completed_successfully`.
 
-Migrations hold a PostgreSQL advisory lock and run inside a transaction per revision. If Alembic exits non-zero, the API does not listen. The script waits up to 180 seconds for `GET /health/ready` to return 200 with `postgres`, `redis`, `minio`, and `worker` all `ok`. On timeout it prints `deploy: FAIL migrate` or `deploy: FAIL health`, the ready body when one exists, and the last 80 lines of the API log. It does not delete the database and it does not downgrade. PostgreSQL rolls back a failed revision. A revision that was committed stays committed; recovery from a bad committed migration is restore-from-backup, which the failure message says.
+Migrations hold a PostgreSQL advisory lock and run inside a transaction per revision. If Alembic exits non-zero, the API does not listen. The script waits up to 180 seconds for `GET /health/ready` to return 200 with `postgres`, `redis`, `s3`, and `worker` all `ok`. On timeout it prints `deploy: FAIL migrate` or `deploy: FAIL health`, the ready body when one exists, and the last 80 lines of the API log. It does not delete the database and it does not downgrade. PostgreSQL rolls back a failed revision. A revision that was committed stays committed; recovery from a bad committed migration is restore-from-backup, which the failure message says.
 
-After ready, the script checks that ports 5432, 6379, 9000, and 9001 are not listening on a public interface. A hit is `deploy: FAIL exposure`.
+After ready, the script checks that ports 5432, 6379, 8333, 9333, 8080, and 8888 are not listening on a public interface. A hit is `deploy: FAIL exposure`.
 
-A second run of the same script builds and starts again, leaves secrets and volumes in place, and exits 0 when ready. `minio-init` is safe to run again: it creates the bucket, user, policy, CORS, lifecycle, and quota only if they are missing, and it does not rotate `media-app`. Bootstrap creates an admin only when none exists.
+A second run of the same script builds and starts again, leaves secrets and volumes in place, and exits 0 when ready. `s3-init` is safe to run again: it creates the bucket, user, policy, CORS, lifecycle, and quota only if they are missing, and it does not rotate `media-app`. Bootstrap creates an admin only when none exists.
 
 ### 3.3 Backup and restore
 
@@ -129,19 +129,20 @@ The one-command claim applies to install and start. It does not apply to restore
 - Backend package layout from [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md): app factory, config, JSON logging, request id, error handler, health routes.
 - SQLAlchemy 2 engine and session dependency. No domain tables yet beyond a migration that enables `citext` and `pg_trgm`.
 - Alembic configured.
-- Redis and MinIO clients that the health check uses.
-- Developer Compose file with Caddy, API, worker (a heartbeat loop only), PostgreSQL, Redis, MinIO.
+- Redis and SeaweedFS clients that the health check uses.
+- Developer Compose file with Caddy, API, worker (a heartbeat loop only), PostgreSQL, Redis, SeaweedFS.
+- The API container healthcheck calls `/health/live`. `/health/ready` depends on the worker heartbeat, and the worker waits for the API, so a ready healthcheck would deadlock startup. Operators still use `/health/ready` to decide if the stack can serve.
 - Frontend Vite app with the app shell, router, and an API client that reads the base URL from the environment. One home page that calls `/health/ready` is enough.
 - `.env.example` with every variable in the architecture document, values empty or local-only.
 - `.gitignore` that excludes `.env`.
 
 **Definition of done:**
 
-- `docker compose up` from a clean checkout brings up health endpoints. `/health/live` is 200. `/health/ready` is 200 only when Postgres, Redis, MinIO, and the worker heartbeat are up.
+- `docker compose up` from a clean checkout brings up health endpoints. `/health/live` is 200. `/health/ready` is 200 only when Postgres, Redis, SeaweedFS, and the worker heartbeat are up.
 - `/docs` shows the health routes.
 - Logs are JSON and include `request_id`.
 - The migration test runs `upgrade head` on an empty database.
-- The API container environment does not include `MINIO_ROOT_PASSWORD`. The test inspects the process environment.
+- The API container environment does not include `S3_ADMIN_SECRET_KEY`. The test inspects the process environment.
 - No video or user features are pretended to exist.
 
 ### Stage 2 — Identity and channels
@@ -190,17 +191,17 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Build:**
 
-- `upload_sessions` including `part_count`, `completion_token`, and nullable `minio_upload_id`. Quota reservation, multipart init, part presign with signed `Content-Length`, `ListParts` verification, complete, abort.
+- `upload_sessions` including `part_count`, `completion_token`, and nullable `s3_upload_id`. Quota reservation, multipart init, part presign with signed `Content-Length`, `ListParts` verification, complete, abort.
 - Sweeper for expired sessions, stale `completing` rows, and multipart uploads that have no session row. The worker process starts running sweepers in this stage.
-- `minio-init` applies the bucket policy, CORS, lifecycle, and bucket quota from [SECURITY_DESIGN.md](SECURITY_DESIGN.md).
+- `s3-init` applies the bucket policy, CORS, lifecycle, and bucket quota from [SECURITY_DESIGN.md](SECURITY_DESIGN.md).
 - Thumbnail and avatar re-encode.
 - Frontend upload screen: file picker, title and description, progress from completed parts, status text.
-- MinIO CORS and the public S3 host on Caddy.
+- SeaweedFS CORS and the public S3 host on Caddy.
 
 **Definition of done:**
 
-- A browser integration or an API test using the MinIO SDK uploads a small file through presigned part URLs, sending each part at the signed `content_length`, and reaches `uploaded` with one queued job. The job is not executed until stage 5, so the test asserts the job row and then cancels it.
-- The stage 4 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.3 pass: part-number rejection, oversized `PUT` rejected by MinIO, `ListParts` size mismatch, concurrent complete, duplicate complete, expired session, sweeper abort, quota lock, unsigned `PUT` denied, and bucket policy without a public principal.
+- A browser integration or an API test using the S3 client uploads a small file through presigned part URLs, sending each part at the signed `content_length`, and reaches `uploaded` with one queued job. The job is not executed until stage 5, so the test asserts the job row and then cancels it.
+- The stage 4 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.3 pass: part-number rejection, oversized `PUT` rejected by SeaweedFS, `ListParts` size mismatch, concurrent complete, duplicate complete, expired session, sweeper abort, quota lock, unsigned `PUT` denied, and bucket policy without a public principal.
 - Abort and expiry release `bytes_reserved` only after the multipart abort succeeds.
 - A thumbnail that is not an image is rejected, and a valid PNG is stored as JPEG without EXIF.
 - API logs for this test do not contain the presigned query string. The test scans captured logs.
@@ -352,7 +353,7 @@ The one-command claim applies to install and start. It does not apply to restore
 - The script is safe to re-run: it does not rotate existing secrets, does not create a second admin, and exits 0 when the stack is already ready.
 - `deploy/backup.sh` produces a dump that `pg_restore -l` can read, and a bucket mirror. One restore rehearsal into a scratch database and scratch bucket is recorded, as specified in section 3.3.
 - Swagger is reachable at `/docs`.
-- Ports 5432, 6379, 9000, and 9001 are not reachable on a public interface. The rehearsal checks this.
+- Ports 5432, 6379, 8333, 9333, 8080, and 8888 are not reachable on a public interface. The rehearsal checks this.
 
 ## 5. Recommended implementation sequence
 

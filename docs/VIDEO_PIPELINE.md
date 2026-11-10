@@ -24,7 +24,7 @@ Non-goals for the first release:
 
 ## 2. Storage layout
 
-One MinIO bucket, `media`, private. No anonymous policy.
+One SeaweedFS bucket, `media`, private. No anonymous policy.
 
 ```text
 originals/{video_id}/source
@@ -47,7 +47,7 @@ Bucket lifecycle rule, as a backstop behind the sweeper:
 
 - abort incomplete multipart uploads after 1 day
 
-The deploy init also sets a hard bucket quota (`MINIO_BUCKET_QUOTA_BYTES`). That cap is disk protection for the whole bucket. It is not a per-user quota. Per-user quota stays in PostgreSQL.
+The deploy init also sets a hard bucket quota (`S3_BUCKET_QUOTA_BYTES`). That cap is disk protection for the whole bucket. It is not a per-user quota. Per-user quota stays in PostgreSQL.
 
 Object expiry of originals is not enabled. Originals are kept so a failed transcode can be retried without asking the user to upload again. The cost is disk. The quota charges the original size plus the HLS and thumbnail sizes actually stored.
 
@@ -58,14 +58,14 @@ sequenceDiagram
   participant B as Browser
   participant A as API
   participant DB as PostgreSQL
-  participant M as MinIO
+  participant M as SeaweedFS
 
   B->>A: POST /videos metadata
   A->>DB: insert video draft private
   B->>A: POST /videos/{id}/upload size and type
   A->>DB: lock quota, reserve bytes, insert session
   A->>M: create multipart upload
-  A->>DB: store minio upload id
+  A->>DB: store s3 upload id
   loop each part batch
     B->>A: POST /upload/parts
     A-->>B: presigned PUT urls bound to an exact Content-Length
@@ -118,11 +118,11 @@ The service rejects the request unless all of the following hold:
 - the user has fewer than `MAX_ACTIVE_UPLOADS` sessions in `initiated` or `completing`
 - `bytes_committed + bytes_reserved + byte_size <= bytes_limit` under `SELECT FOR UPDATE` on the quota row
 
-On success, in one transaction, the service reserves `byte_size` and inserts an upload session with `expires_at = now() + 24 hours`, `part_size = PART_SIZE_BYTES`, `part_count`, and `minio_upload_id` null. It then creates the multipart upload on key `originals/{video_id}/source`. A second transaction stores the upload id and sets the video to `uploading`.
+On success, in one transaction, the service reserves `byte_size` and inserts an upload session with `expires_at = now() + 24 hours`, `part_size = PART_SIZE_BYTES`, `part_count`, and `s3_upload_id` null. It then creates the multipart upload on key `originals/{video_id}/source`. A second transaction stores the upload id and sets the video to `uploading`.
 
 If create-multipart fails, the service releases the reservation, marks the session `aborted`, and returns `503 STORAGE_UNAVAILABLE`. The video returns to `draft` so the owner can try again. No job is inserted.
 
-If the process dies after MinIO created the upload and before the upload id is stored, the id is lost. The sweeper releases that reservation after 5 minutes. A reconciliation pass aborts multipart uploads whose id is not in `upload_sessions`. The lifecycle rule is the backstop if both the API and the sweeper are down.
+If the process dies after SeaweedFS created the upload and before the upload id is stored, the id is lost. The sweeper releases that reservation after 5 minutes. A reconciliation pass aborts multipart uploads whose id is not in `upload_sessions`. The lifecycle rule is the backstop if both the API and the sweeper are down.
 
 ### 3.4 Presign parts
 
@@ -137,9 +137,9 @@ The API rejects the call with `422 UPLOAD_PART_INVALID` when:
 
 Otherwise it returns one presigned `PUT` per number. Each URL is SigV4, path-style, bound to that object key, that upload id, that part number, and the exact `Content-Length` from section 3.2. `SignedHeaders` includes `host` and `content-length`. The response tells the client the `content_length` it must send. URLs expire after 20 minutes. Asking again for the same numbers returns new URLs for the same upload id and the same lengths.
 
-A `PUT` with any other length fails signature validation in MinIO and stores nothing. The API does not accept a client-supplied length.
+A `PUT` with any other length fails signature validation in SeaweedFS and stores nothing. The API does not accept a client-supplied length.
 
-Presigning uses `S3_PUBLIC_BASE_URL`. The browser never receives `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_ROOT_USER`, or `MINIO_ROOT_PASSWORD`.
+Presigning uses `S3_PUBLIC_ENDPOINT_URL`. The browser never receives `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ADMIN_ACCESS_KEY`, or `S3_ADMIN_SECRET_KEY`.
 
 ### 3.5 Complete
 
@@ -152,11 +152,11 @@ The client list is a hint. `ListParts` is the authority.
 3. If status is `aborted` or `expired`, return `409 INVALID_STATE` or `409 UPLOAD_EXPIRED`.
 4. If `expires_at` has passed, return `409 UPLOAD_EXPIRED` and leave cleanup to the sweeper.
 5. If status is `completing`, `completion_started_at` is within the last 2 minutes, and `completion_token` is not this request, return `409 UPLOAD_IN_PROGRESS`.
-6. Otherwise set `completing`, a new `completion_token`, and `completion_started_at = now()`, then commit so the row lock is not held during MinIO calls.
+6. Otherwise set `completing`, a new `completion_token`, and `completion_started_at = now()`, then commit so the row lock is not held during SeaweedFS calls.
 
 After the lock is released:
 
-7. `ListParts` for that upload id. This call uses the application credentials on the internal MinIO endpoint.
+7. `ListParts` for that upload id. This call uses the application credentials on the internal SeaweedFS endpoint.
 8. Reject unless the part numbers are exactly the set `1 .. part_count`, with no gaps and no extras.
 9. Reject unless each part's `Size` equals the signed length for that part number, and the sum equals `expected_size` exactly. There is no percentage tolerance. A tolerance would let a caller store more bytes than the quota reservation.
 10. Reject unless every client ETag matches the ETag `ListParts` returned for that part number. Compare the hex value, ignoring surrounding quotes.
@@ -185,14 +185,14 @@ A network error from `CompleteMultipartUpload` is followed by `HEAD`. A matching
 
 ### 3.7 Who enforces each check
 
-| Check | API | MinIO |
+| Check | API | SeaweedFS |
 | --- | --- | --- |
 | Caller owns the video and the session is active | Yes | No user model |
 | `byte_size` ≤ `MAX_UPLOAD_BYTES` and `part_count` ≤ `MAX_PARTS` | Yes, at initiate | No. S3's own ceiling is 10,000 parts and 5 GiB per part |
 | Part numbers are unique and inside `1 .. part_count` | Yes, before any URL is signed | A URL signed for part 3 fails if it is sent as part 4, because `partNumber` is in the signature |
-| Non-final part is exactly 16 MiB, final part is the exact remainder | Yes. The signature covers `Content-Length`. Complete compares `ListParts` sizes with those lengths | Yes. A different `Content-Length` fails SigV4 and MinIO stores no part. MinIO also rejects a non-final part under 5 MiB and any part over 5 GiB |
-| Sum of stored parts equals `expected_size` | Yes, from `ListParts` and again from `HEAD` | No. MinIO does not know the declared size |
-| Client ETags match stored parts | Yes | MinIO returns the ETags; it does not see the client's complete body as authority until the API sends it |
+| Non-final part is exactly 16 MiB, final part is the exact remainder | Yes. The signature covers `Content-Length`. Complete compares `ListParts` sizes with those lengths | Yes. A different `Content-Length` fails SigV4 and SeaweedFS stores no part. SeaweedFS also rejects a non-final part under 5 MiB and any part over 5 GiB |
+| Sum of stored parts equals `expected_size` | Yes, from `ListParts` and again from `HEAD` | No. SeaweedFS does not know the declared size |
+| Client ETags match stored parts | Yes | SeaweedFS returns the ETags; it does not see the client's complete body as authority until the API sends it |
 | Quota reservation and commit | Yes, row lock in PostgreSQL | No per-user quota |
 | Duplicate complete | Yes. `completed` returns the current video. One active job per video | A second `CompleteMultipartUpload` returns `NoSuchUpload`. The API must not treat that error as success unless `HEAD` already shows the verified object |
 | Concurrent complete | Yes. Row lock plus `completion_token`. The loser receives `409 UPLOAD_IN_PROGRESS` | Not used as the concurrency control |
@@ -209,13 +209,13 @@ The sweeper runs every 60 seconds.
 
 | Condition | Action |
 | --- | --- |
-| Session `initiated`, `minio_upload_id` null, older than 5 minutes | Release reservation, session `aborted`, video `abandoned` if it was still `draft` |
+| Session `initiated`, `s3_upload_id` null, older than 5 minutes | Release reservation, session `aborted`, video `abandoned` if it was still `draft` |
 | Session `initiated` and `expires_at` passed | Abort multipart upload, then release reservation, session `expired`, video `abandoned` |
 | Session `completing`, `error_code` set | Retry abort and object delete, then release reservation, session `aborted`, video `failed` |
 | Session `completing`, no `error_code`, older than 2 minutes, `HEAD` size equals `expected_size` | Finish the database completion transition if no active job exists. Do not complete the multipart upload again |
 | Session `completing`, no `error_code`, older than 2 minutes, object missing | Run the same `ListParts` checks as complete. Valid parts are completed. Invalid parts are aborted |
 | Video `draft` older than 24 hours | Set `abandoned` |
-| Multipart upload under `originals/` whose upload id is not stored on a session, and whose MinIO `Initiated` time is older than 15 minutes | `AbortMultipartUpload` |
+| Multipart upload under `originals/` whose upload id is not stored on a session, and whose SeaweedFS `Initiated` time is older than 15 minutes | `AbortMultipartUpload` |
 | Video `uploaded` with no queued or running job, and fewer than 6 historical jobs | Insert a queued job |
 | Job `running` and `locked_until` passed | Set job `queued`, clear lock, set video `uploaded`, set `next_run_at = now()` |
 
@@ -353,7 +353,7 @@ The worker does not try to resume mid-FFmpeg. A retry repeats probe, thumbnail, 
 | ffprobe says there is no video stream, or duration is out of range | fatal | Job failed, video `failed`, no retry |
 | Pillow or JPEG encode failure for the auto thumbnail | retryable | Backoff and retry |
 | FFmpeg non-zero exit, timeout, or playlist validation failure | retryable | Backoff and retry |
-| MinIO network error | retryable | Backoff and retry |
+| SeaweedFS network error | retryable | Backoff and retry |
 | Not enough scratch disk | retryable | 30 minute backoff |
 | Video soft-deleted mid-job | cancelled | Stop, do not mark ready |
 | Attempt would exceed 3 automatic tries | n/a | Job failed, video `failed` |
@@ -388,7 +388,7 @@ Why segment URLs are not embedded in the playlist: a VOD player often reads the 
 3. The API inserts a `playback_sessions` row expiring in 6 hours and sets the path-scoped `hls_session` cookie.
 4. The player loads `GET /api/v1/videos/{id}/hls/master.m3u8` with that cookie. `hls.js` uses credentials. Safari native HLS sends the cookie because the URL is same-site and the cookie path matches.
 5. The API loads the session, checks it is not revoked or expired, checks `video_id` matches, and re-reads the video ACL. A failed check returns 404 and revokes the session.
-6. The API reads the master playlist from MinIO and rewrites variant URIs to relative API paths such as `720/index.m3u8`.
+6. The API reads the master playlist from SeaweedFS and rewrites variant URIs to relative API paths such as `720/index.m3u8`.
 7. The variant endpoint checks the session and ACL again, reads the variant playlist, and leaves segment names relative (`segment_00001.ts`). The resolved URL is `/api/v1/videos/{id}/hls/720/segment_00001.ts`, which is still under the cookie path.
 8. The segment endpoint checks the session and ACL again. On success it responds `302` to a presigned `GET` that expires in `PLAYBACK_SEGMENT_TTL_SECONDS` (default 120). The browser then downloads the bytes from `s3.<domain>`.
 9. Playlist and redirect responses send `Cache-Control: no-store`.
@@ -432,7 +432,7 @@ Moderator playback uses `POST /api/v1/moderation/videos/{id}/playback`, which wr
 
 ## 9. Deletion
 
-Owner delete sets `deleted_at` and `acl_version`, revokes playback sessions for that video, and decrements `bytes_committed` by the known stored size in the same transaction. It does not wait for MinIO.
+Owner delete sets `deleted_at` and `acl_version`, revokes playback sessions for that video, and decrements `bytes_committed` by the known stored size in the same transaction. It does not wait for SeaweedFS.
 
 The sweeper deletes all keys under `originals/{video_id}/`, `hls/{video_id}/`, and `thumbnails/{video_id}/`, then sets `storage_released_at`. Deleting an already-missing key is success. If the sweeper crashes, it retries because `storage_released_at` is still null.
 

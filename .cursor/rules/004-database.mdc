@@ -1,0 +1,13 @@
+---
+description: Alembic, keys, and transactions
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Database
+
+- Change the schema only with Alembic. The first revision enables `citext` and `pg_trgm` and does not create product tables.
+- Use UUID v7 for future entity keys and `timestamptz` for timestamps, as `docs/DATABASE_DESIGN.md` specifies. Playback session ids are the UUID v4 exception.
+- Declare foreign keys and check constraints in the migration, not only in Python.
+- Multi-step writes share one transaction. Counter updates use SQL arithmetic.
+- Integration tests that touch SQL run against PostgreSQL.

@@ -14,7 +14,7 @@ The system is a **modular monolith** plus one worker process and one object-stor
 - One worker process, built from the same codebase, runs FFmpeg and storage maintenance.
 - PostgreSQL is the source of truth for users, catalogue data, and processing jobs.
 - Redis is a small set of ephemeral counters and heartbeats, not a second source of truth.
-- MinIO stores bytes. The database stores object keys and status.
+- SeaweedFS stores bytes. The database stores object keys and status.
 - Caddy terminates TLS, serves the static frontend, proxies the API, and proxies the S3 API on a separate host name.
 
 Microservices were rejected for the first release. A single server does not benefit from network hops between "user service", "video service", and "comment service". Module boundaries inside one process give separation without distributed failure modes. See ADR-001.
@@ -38,20 +38,20 @@ flowchart LR
   subgraph data [Data]
     PG[(PostgreSQL)]
     Redis[(Redis)]
-    MinIO[(MinIO private bucket)]
+    SeaweedFS[(SeaweedFS private bucket)]
   end
 
   Browser --> AppHost
   Browser --> S3Host
   AppHost --> API
   AppHost --> Static[Static React build]
-  S3Host --> MinIO
+  S3Host --> SeaweedFS
   API --> PG
   API --> Redis
-  API --> MinIO
+  API --> SeaweedFS
   Worker --> PG
   Worker --> Redis
-  Worker --> MinIO
+  Worker --> SeaweedFS
 ```
 
 ## 2. Component responsibilities
@@ -74,9 +74,9 @@ Two sites:
 | Site | Routes |
 | --- | --- |
 | `https://<domain>` | `/` static files, `/api/*` to FastAPI, `/docs` and `/redoc` and `/openapi.json` to FastAPI, `/health/*` to FastAPI |
-| `https://s3.<domain>` | Reverse proxy to MinIO port 9000, preserving the `Host` header used to sign presigned URLs |
+| `https://s3.<domain>` | Reverse proxy to the SeaweedFS S3 gateway on port 8333, preserving the `Host` header used to sign presigned URLs |
 
-The MinIO console port is not published.
+The SeaweedFS admin UI port is not published.
 
 Caddy also sets security headers (ADR-014). Demo mode without DNS listens on port 80 and does not mark cookies `Secure`.
 
@@ -95,7 +95,7 @@ backend/app/
   services/               # use cases and transactions
   repositories/           # SQLAlchemy queries
   db/                     # engine, session, base
-  integrations/           # MinIO, Redis, clock
+  integrations/           # SeaweedFS, Redis, clock
   workers/                # claim loop, ffmpeg, sweepers (worker image only)
 ```
 
@@ -107,7 +107,7 @@ api → services → integrations
 workers → services
 ```
 
-Routers do not contain business rules and do not call MinIO or Redis directly. Services do not import `fastapi`. Repositories do not commit; the service owns the transaction boundary. This is the standard the implementation must follow. Extra layers such as generic unit-of-work frameworks are intentionally absent (ADR-026).
+Routers do not contain business rules and do not call SeaweedFS or Redis directly. Services do not import `fastapi`. Repositories do not commit; the service owns the transaction boundary. This is the standard the implementation must follow. Extra layers such as generic unit-of-work frameworks are intentionally absent (ADR-026).
 
 Modules:
 
@@ -160,7 +160,7 @@ Used only for:
 
 Redis is not used for sessions, job queues, or feed caches. Losing Redis must not lose users, videos, or jobs. It does stop new logins that are rate limited and makes readiness fail, because abuse protection would otherwise silently disappear (ADR-022, ADR-024).
 
-### 2.7 MinIO
+### 2.7 SeaweedFS
 
 One private bucket, default name `media`. Layout:
 
@@ -241,7 +241,7 @@ sequenceDiagram
   participant B as Browser
   participant A as FastAPI
   participant DB as PostgreSQL
-  participant S as MinIO
+  participant S as SeaweedFS
 
   B->>A: POST /playback with Bearer token
   A->>DB: check visibility, grant, moderation, ready
@@ -268,14 +268,14 @@ In one transaction the service sets `moderation_status = hidden`, increments `ac
 
 ## 4. Data flow and consistency
 
-There is no distributed transaction across PostgreSQL and MinIO. The design uses a **database outbox in the same row family** plus a sweeper.
+There is no distributed transaction across PostgreSQL and SeaweedFS. The design uses a **database outbox in the same row family** plus a sweeper.
 
 | Step | Durable state if the process crashes |
 | --- | --- |
 | After draft insert | Video `draft`. No objects |
-| After multipart start | Upload session `initiated`, quota reserved, MinIO upload id stored. Part URLs are signed for an exact `Content-Length` |
-| After parts uploaded, before complete | MinIO holds only parts whose size matched the signature. Sweeper aborts the session after `expires_at` |
-| After MinIO complete, before DB commit | Session left in `completing`. Sweeper sees the object and finishes the DB transition |
+| After multipart start | Upload session `initiated`, quota reserved, SeaweedFS upload id stored. Part URLs are signed for an exact `Content-Length` |
+| After parts uploaded, before complete | SeaweedFS holds only parts whose size matched the signature. Sweeper aborts the session after `expires_at` |
+| After SeaweedFS complete, before DB commit | Session left in `completing`. Sweeper sees the object and finishes the DB transition |
 | After DB commit | Video `uploaded`, one queued job |
 | During transcode | Job `running` with `locked_until`. Stale lock returns the job to `queued` |
 | After artifact upload, before finalize | Objects may exist. Retry overwrites the same keys, then commits `ready` |
@@ -293,13 +293,13 @@ Environment variables are the only configuration channel. A `.env` file is gener
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL |
 | `REDIS_URL` | Redis URL |
-| `MINIO_ENDPOINT` | Internal `minio:9000`. API and worker only |
-| `S3_PUBLIC_BASE_URL` | `https://s3.<domain>` used only to presign |
-| `MINIO_DOMAIN` | `s3.<domain>`, given to the MinIO process |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `media-app` credentials. API and worker only |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO process and `minio-init` only. Not in the API environment |
-| `MINIO_BUCKET` | Default `media` |
-| `MINIO_BUCKET_QUOTA_BYTES` | Hard bucket cap set by init |
+| `S3_ENDPOINT_URL` | Internal `seaweedfs:8333`. API and worker only |
+| `S3_PUBLIC_ENDPOINT_URL` | `https://s3.<domain>` used only to presign |
+| `S3_REGION` | SigV4 region. Default `us-east-1`. Requests use path-style addressing |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `media-app` credentials. API and worker only |
+| `S3_ADMIN_ACCESS_KEY` / `S3_ADMIN_SECRET_KEY` | SeaweedFS process and `s3-init` only. Not in the API environment |
+| `S3_BUCKET` | Default `media` |
+| `S3_BUCKET_QUOTA_BYTES` | Hard bucket cap set by init |
 | `PART_SIZE_BYTES` | `16777216` |
 | `MAX_PARTS` | `512` |
 | `UPLOAD_PART_URL_TTL_SECONDS` | Default 1200 |
@@ -363,13 +363,13 @@ Compose services, in start order:
 | --- | --- | --- | --- |
 | 1 | `postgres` | PostgreSQL 16. Healthcheck `pg_isready` | none |
 | 1 | `redis` | Redis 7, AOF on. Healthcheck `PING` | none |
-| 1 | `minio` | MinIO. `MINIO_BROWSER=off`. Healthcheck is a TCP check on 9000 inside the network | none |
-| 2 | `minio-init` | One-shot. Creates the bucket, `media-app`, policy, CORS, lifecycle, and bucket quota. Exits 0 on repeat | none |
-| 3 | `api` | Migrates, then serves. Depends on postgres healthy, redis healthy, and `minio-init` completed | none |
-| 4 | `worker` | Heartbeat, sweepers, and transcode. Depends on `api` healthy so the schema exists | none |
+| 1 | `seaweedfs` | SeaweedFS 4.53. One process runs master, volume, filer, and the S3 gateway. Master, volume, and filer bind to loopback inside the container. Filer HTTP is disabled. The S3 port is on the Docker network and is not published. Healthcheck is the master status page | none |
+| 2 | `s3-init` | One-shot. Creates the bucket, CORS, lifecycle, and bucket quota. Exits 0 on repeat | none |
+| 3 | `api` | Migrates, then serves. Depends on postgres healthy, redis healthy, and `s3-init` completed. The container healthcheck is `GET /health/live`, because `/health/ready` includes the worker heartbeat and the worker waits for the API | none |
+| 4 | `worker` | Heartbeat, sweepers, and transcode. Depends on `api` healthy (liveness) so the schema exists | none |
 | 5 | `edge` | Caddy plus the static build. Depends on `api` healthy | 80, 443 |
 
-Volumes: `pg_data`, `redis_data`, `minio_data`, `work_data`. `work_data` holds transcode scratch and may be recreated. The other three may not.
+Volumes: `pg_data`, `redis_data`, `seaweed_data`, `work_data`. `work_data` holds transcode scratch and may be recreated. The other three may not.
 
 The API container runs Alembic `upgrade head` before binding the port, under a PostgreSQL advisory lock. Each revision runs in a transaction. A failed revision rolls back and the process exits non-zero without listening. Compose may restart it. The deploy script does not treat a restart loop as success, and it does not run `downgrade`.
 
@@ -390,7 +390,7 @@ The API container runs Alembic `upgrade head` before binding the port, under a P
 | Alembic | Migrations | Required. Versioned schema |
 | PostgreSQL 16 | System of record and job queue | Required. Constraints, FTS, `SKIP LOCKED` |
 | Redis 7 | Rate limits and heartbeat | Required. Isolated from durable state |
-| MinIO | S3-compatible bytes | Required. Private bucket, presigned multipart |
+| SeaweedFS | S3-compatible bytes | Required. Private bucket, presigned multipart |
 | FFmpeg | Probe, thumbnail, HLS | Required. Industry default, scriptable |
 | Caddy | TLS and routing | One binary obtains certificates when a domain is set |
 | React + Vite + TypeScript | UI | Required. Static build fits a single host |
@@ -404,7 +404,7 @@ Alternatives that were considered and rejected are recorded as ADRs, not repeate
 
 If one server is no longer enough, the split order is:
 
-1. Move MinIO to a larger disk or a managed S3 endpoint. Keys and presign flow stay the same.
+1. Move SeaweedFS to a larger disk or a managed S3 endpoint. Keys and presign flow stay the same.
 2. Run extra workers against the same job table.
 3. Put a CDN in front of public segment URLs. Private videos stay on presigned URLs.
 4. Add PostgreSQL backups and, only with evidence of read pressure, a replica for search.

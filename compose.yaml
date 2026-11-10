@@ -1,0 +1,200 @@
+name: youtube-clone
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  seaweed_data:
+  work_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: youtube
+      POSTGRES_PASSWORD: youtube
+      POSTGRES_DB: youtube
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U youtube -d youtube"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [app]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [app]
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    entrypoint: ["/bin/sh", "/opt/platform/write-identity.sh"]
+    command:
+      - server
+      - -ip=127.0.0.1
+      - -ip.bind=127.0.0.1
+      - -master.telemetry=false
+      - -filer
+      - -filer.disableHttp=true
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -s3.iam=false
+      - -s3.autoCreateBucket=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
+      - -s3.ip.bind=0.0.0.0
+      - -s3.allowedOrigins=${PUBLIC_APP_URL}
+      - -s3.externalUrl=${S3_PUBLIC_ENDPOINT_URL}
+    env_file:
+      - .env.seaweed-admin
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+    volumes:
+      - seaweed_data:/data
+      - ./deploy/seaweedfs/write-identity.sh:/opt/platform/write-identity.sh:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if command -v wget >/dev/null; then wget -q -O /dev/null http://127.0.0.1:9333/cluster/status; elif command -v curl >/dev/null; then curl -fsS http://127.0.0.1:9333/cluster/status >/dev/null; else exit 1; fi",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks: [app]
+
+  s3-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: api
+    entrypoint: ["python", "-m", "app.infrastructure.s3_init"]
+    env_file:
+      - .env.seaweed-admin
+    environment:
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+      S3_REGION: ${S3_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_BUCKET_QUOTA_BYTES: ${S3_BUCKET_QUOTA_BYTES}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL}
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+    networks: [app]
+
+  api:
+    build:
+      context: ./backend
+      target: api
+    env_file:
+      - .env
+    environment:
+      STORAGE_STARTUP_CHECK: "true"
+    volumes:
+      - work_data:/var/lib/media-work
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    networks: [app]
+
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    env_file:
+      - .env
+    environment:
+      STORAGE_STARTUP_CHECK: "false"
+    volumes:
+      - work_data:/var/lib/media-work
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,redis; redis.Redis.from_url(os.environ['REDIS_URL']).get('worker:heartbeat') or exit(1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    networks: [app]
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+    networks: [app]
+
+  edge:
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      app:
+        aliases:
+          - s3.localhost
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+---
+description: Input validation, credentials, and private storage
+alwaysApply: true
+---
+
+# Security
+
+- Treat every request as untrusted. Validate it on the server. A hidden button is not an access check.
+- Never put `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY` in the API, worker, edge, or frontend environment. The API must exit if those variables are present.
+- The `media` bucket stays private. Do not add a public-read policy or anonymous download.
+- Do not log secrets, refresh cookies, or presigned URLs.
+- Follow `docs/SECURITY_DESIGN.md` when adding auth, uploads, or playback. Do not weaken a control to make a test pass.

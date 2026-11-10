@@ -26,7 +26,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 ## ADR-003 — Presigned multipart uploads
 
-**Decision.** Yes. The browser uploads parts directly to MinIO with presigned `PUT` URLs. The API handles initiate, presign, complete, and abort.
+**Decision.** Yes. The browser uploads parts directly to the S3 gateway with presigned `PUT` URLs. The API handles initiate, presign, complete, and abort.
 
 **Alternatives.** Proxy the file through FastAPI. Single presigned `PUT` for the whole object. TUS protocol.
 
@@ -143,7 +143,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 ## ADR-014 — Caddy with a separate S3 hostname
 
-**Decision.** Caddy serves the app on `https://<domain>` and reverse-proxies MinIO on `https://s3.<domain>`, preserving `Host`. The MinIO console is not published. Demo mode without a domain uses HTTP and insecure cookies, and the script says so.
+**Decision.** Caddy serves the app on `https://<domain>` and reverse-proxies the SeaweedFS S3 gateway on `https://s3.<domain>`, preserving `Host`. The SeaweedFS admin UI is not published. Demo mode without a domain uses HTTP and insecure cookies, and the script says so.
 
 **Alternatives.** Nginx with `auth_request`. MinIO published on port 9000. Path prefix `/s3` on the app host.
 
@@ -163,13 +163,13 @@ Each record is the choice the other documents follow. If a later document disagr
 
 ## ADR-016 — Synchronous worker
 
-**Decision.** The worker is a synchronous Python process. FFmpeg is a subprocess. The API is asynchronous FastAPI. Shared integration code is synchronous and the API calls it with `asyncio.to_thread` when a request must wait on MinIO.
+**Decision.** The worker is a synchronous Python process. FFmpeg is a subprocess. The API is asynchronous FastAPI. Shared integration code is synchronous and the API calls it with `asyncio.to_thread` when a request must wait on object storage.
 
 **Alternatives.** Async worker. Celery prefork.
 
 **Why.** Transcoding blocks on a process and on disk. Async would not overlap usefully inside one transcode. A synchronous claim loop is easier to reason about for locks and `finally` cleanup.
 
-**Limitations.** The API must not call FFmpeg. Thumbnail re-encode uses Pillow inside a thread, and the 2 MB cap keeps that short. If MinIO calls are ever made directly on the event loop, that is a defect.
+**Limitations.** The API must not call FFmpeg. Thumbnail re-encode uses Pillow inside a thread, and the 2 MB cap keeps that short. If object-storage calls are ever made directly on the event loop, that is a defect.
 
 ## ADR-017 — View deduplication table
 
@@ -297,7 +297,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Alternatives.** One bucket per type. One bucket per video.
 
-**Why.** Lifecycle and credentials are simpler with one bucket on one MinIO instance. Prefixes are enough to delete a video's objects. Per-video buckets would create an operability problem at modest catalogue sizes.
+**Why.** Lifecycle and credentials are simpler with one bucket on one storage instance. Prefixes are enough to delete a video's objects. Per-video buckets would create an operability problem at modest catalogue sizes.
 
 **Limitations.** A lifecycle rule cannot easily expire originals without expiring HLS, because both share a bucket. The design does not expire originals. If disk pressure appears, a prefix-filtered rule can be added later without moving HLS.
 
@@ -313,7 +313,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 ## ADR-031 — Upload part URLs are bound to an exact length
 
-**Decision.** Every presigned `UploadPart` URL signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder of `expected_size`. `part_count` is at most 512. Complete calls `ListParts`, requires those sizes and a matching sum, then requires `HEAD` to return `expected_size`. There is no percentage tolerance. Quota reserved at initiate is the maximum those URLs can store. Concurrent completes serialize on the session row. A completed session returns the same video and does not insert a second job. Expired and untracked multipart uploads are aborted by the sweeper, with a one-day MinIO lifecycle rule behind it.
+**Decision.** Every presigned `UploadPart` URL signs `Content-Length`. Non-final parts are exactly 16 MiB. The final part is the exact remainder of `expected_size`. `part_count` is at most 512. Complete calls `ListParts`, requires those sizes and a matching sum, then requires `HEAD` to return `expected_size`. There is no percentage tolerance. Quota reserved at initiate is the maximum those URLs can store. Concurrent completes serialize on the session row. A completed session returns the same video and does not insert a second job. Expired and untracked multipart uploads are aborted by the sweeper, with a one-day object-storage lifecycle rule behind it.
 
 **Alternatives.** Trust the client's ETag list. Allow a size tolerance. Sign URLs without `Content-Length` and rely on complete-time rejection. Proxy the file through the API so size is observed on the way through.
 
@@ -321,7 +321,9 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Limitations.** The browser and Caddy must pass `Content-Length` through unchanged. That is an implementation-time test, not an assumption. If MinIO or the presign helper silently omits the header from `SignedHeaders`, the stage 4 oversized `PUT` test fails the build. A bucket quota still caps total disk use and does not replace the signature.
 
-## ADR-032 — Separate MinIO root and application credentials
+## ADR-032 — Separate storage admin and application credentials
+
+**Status.** Superseded by ADR-034. The credential split remains. The storage server is SeaweedFS, not MinIO.
 
 **Decision.** The MinIO process and a one-shot init container hold root credentials. Init creates user `media-app` and attaches the bucket policy in [SECURITY_DESIGN.md](SECURITY_DESIGN.md). The API and the worker receive only `media-app`. The API exits if root credentials are in its environment. The bucket policy has no `Principal: "*"` and no `s3:*`. The console is off. Ports 9000 and 9001 are not published. CORS allows one origin, methods `GET`, `PUT`, and `HEAD`, and exposes `ETag` only.
 
@@ -333,7 +335,7 @@ Each record is the choice the other documents follow. If a later document disagr
 
 ## ADR-033 — The install script is not allowed to destroy data
 
-**Decision.** `bash deploy/ubuntu-up.sh` checks OS, Docker, disk, memory, and environment before it starts containers. It creates persistent volumes on first install and refuses to recreate `pg_data`, `redis_data`, or `minio_data` when `.env` already exists. It never runs `down -v`. It waits for `/health/ready`. A migration failure stops the script, leaves the volume in place, and prints `deploy: FAIL migrate`. Repeat runs do not rotate secrets. Restore is a separate documented procedure, and a backup is not accepted unless `pg_restore -l` succeeds.
+**Decision.** `bash deploy/ubuntu-up.sh` checks OS, Docker, disk, memory, and environment before it starts containers. It creates persistent volumes on first install and refuses to recreate `pg_data`, `redis_data`, or `seaweed_data` when `.env` already exists. It never runs `down -v`. It waits for `/health/ready`. A migration failure stops the script, leaves the volume in place, and prints `deploy: FAIL migrate`. Repeat runs do not rotate secrets. Restore is a separate documented procedure, and a backup is not accepted unless `pg_restore -l` succeeds.
 
 **Alternatives.** A short script that only runs `docker compose up -d`. Auto-restore when migrations fail. Recreate volumes whenever the script is unsure.
 
@@ -341,18 +343,34 @@ Each record is the choice the other documents follow. If a later document disagr
 
 **Limitations.** The script cannot repair a migration that committed and then proved wrong. That recovery is restore-from-backup. The script also cannot install Ubuntu packages on a host without apt and systemd.
 
+## ADR-034 — Replace MinIO with SeaweedFS
+
+**Decision.** Object storage is SeaweedFS 4.53, image `chrislusf/seaweedfs:4.53` pinned by digest, running as one `weed server` process with the filer and the S3 gateway. The application continues to use boto3 with path-style SigV4. Internal calls use `S3_ENDPOINT_URL`. Presigned URLs use `S3_PUBLIC_ENDPOINT_URL`. The bucket stays private. `media-app` is limited to that bucket. `S3_ADMIN_ACCESS_KEY` and `S3_ADMIN_SECRET_KEY` are loaded only by the SeaweedFS process and `s3-init`.
+
+**Why MinIO was removed.** The community images `minio/minio` and `minio/mc` are no longer anonymously pullable. Docker Hub returns 404 for the pinned tags. Quay.io returns 401 and issues an anonymous token with an empty pull permission. The Compose build cannot fetch those images.
+
+**Why SeaweedFS.** It publishes a maintained image, speaks the S3 API the upload and playback design already uses, and can run master, volume, filer, and the S3 gateway in one process on a single host. PostgreSQL remains the system of record. Redis remains the rate-limit and heartbeat store.
+
+**Compatibility.** Create, head, get, put, and delete objects, multipart upload, `ListParts`, abort, presigned PUT and GET, CORS, lifecycle abort of incomplete multipart uploads, and a bucket byte quota are part of the storage contract. The quota uses the SeaweedFS `?seaweedfs-quota` subresource rather than a MinIO admin command. Authorization is an identity file, not a MinIO IAM user. Anonymous callers have no actions. Path-style addressing is required. Master, volume, and filer bind to loopback inside the container, filer HTTP is disabled, and the embedded IAM API on the S3 port is disabled. The S3 port is not published.
+
+**Trade-offs.** The gateway must hold both identities so it can verify signatures, including the admin identity. That is narrower than giving the admin identity to the API, and it is broader than a server that can boot without storing the admin secret. Bucket quota enforcement is a SeaweedFS extension, so a generic S3 service would ignore that call. A future move to another S3 service keeps the boto3 client and the endpoint variables and drops the quota subresource.
+
+**Operations.** Data lives in the `seaweed_data` volume. `s3-init` is safe to run again and does not rotate `media-app`. Restarting the SeaweedFS container must keep the volume. Rollback is to restore `seaweed_data` from the mirror backup and point `S3_ENDPOINT_URL` at the previous gateway. Existing `minio_data` volumes are not mounted. A deployment that already stored objects in MinIO has to copy those keys into the `media` bucket before it is cut over. This repository had not completed a MinIO stack start, so there is no in-place data migration.
+
+**Limitations.** Master, volume, and filer still exist inside the container even though their HTTP ports are not published. Host access to the container environment is administrative access. The public S3 hostname must be the host that was signed, which is why Caddy preserves `Host`.
+
 ## 10. Cross-cutting rules that are easy to break
 
 These are decisions even though they are short.
 
 - Business rules live in services. Routers translate HTTP. Repositories run SQL.
 - The frontend is never the authority for visibility, role, or quota.
-- MinIO credentials never appear in a response, a frontend bundle, or a log line.
+- S3 credentials never appear in a response, a frontend bundle, or a log line.
 - Video bytes never go in PostgreSQL and never go through the API, except thumbnails and avatars under 2 MB.
 - Processing jobs are idempotent at the object-key level and unique while active.
 - A private or hidden video is not delivered by making a prefix public.
 - An upload part URL signs one `Content-Length`. Complete trusts `ListParts` and `HEAD`, not the client's size claim.
-- MinIO root credentials are not placed in the API, worker, edge, or frontend environment.
+- Storage admin credentials are not placed in the API, worker, edge, or frontend environment.
 
 ## 11. Confirmations still open
 
@@ -392,7 +410,7 @@ The documents were checked against each other after the playback and logout desi
 | Counters | Updated in SQL in the same transaction as the source write. |
 | Identifiers | UUID v7 for entities, UUID v4 for playback session ids. |
 | Upload size check | The first draft allowed `HEAD` to differ from the declaration by 1 percent. That tolerated a quota bypass. Every document now requires an exact `Content-Length` signature and an exact `ListParts` / `HEAD` match (ADR-031). |
-| MinIO credentials | The first draft gave the API the same MinIO keys the server uses. Root now stays on the MinIO process and `minio-init`. The API uses `media-app` and exits if it sees root (ADR-032). |
+| Storage credentials | The first draft gave the API the same keys the server uses. Admin credentials stay on the SeaweedFS process and `s3-init`. The API uses `media-app` and exits if it sees admin credentials (ADR-032, ADR-034). |
 | Deploy repeat | The install script must not delete volumes or rotate secrets. Failure text is `deploy: FAIL <code>` (ADR-033). |
 
 Remaining gaps are requirements the brief does not give, not contradictions:
@@ -414,7 +432,7 @@ The stage 00 review below records the changes made after the first design pass. 
 - Transcode concurrency of 1 means a queue forms under batch uploads. Status `uploaded` is the visible "waiting" state.
 - Account recovery does not exist until a mail design is added.
 - A presigned part URL is only as strict as the signature the code actually produces. ADR-031 is enforced by the stage 4 oversized-`PUT` test.
-- MinIO root credentials remain in the MinIO process environment.
+- Storage admin credentials remain in the SeaweedFS process environment.
 
 ## Stage 00 Architecture Review
 
@@ -425,11 +443,11 @@ This section records the review that produced ADR-031, ADR-032, and ADR-033. No 
 - Upload part URLs now sign an exact `Content-Length`. Non-final parts are 16 MiB. The final part is the remainder of the declared size. `part_count` is capped at 512, which caps a configured upload at 8 GiB.
 - Complete verifies `ListParts` (part numbers, per-part sizes, sum, ETags) and then `HEAD`. The 1 percent size tolerance was removed.
 - Duplicate complete returns the current video and does not insert a second job. Concurrent complete takes a row lock and returns `409 UPLOAD_IN_PROGRESS` to the loser.
-- Quota is reserved before any part URL is issued and is released only after MinIO abort succeeds, or moved to `bytes_committed` only after the size check passes.
-- Expired sessions are rejected by the API and aborted by the sweeper. Multipart uploads with no session row are aborted after 15 minutes. MinIO lifecycle still aborts incomplete uploads after one day. A hard bucket quota is a disk backstop.
-- `upload_sessions` gained `part_count`, `error_code`, `completion_token`, `completion_started_at`, and a nullable `minio_upload_id`, plus checks that keep part geometry consistent.
+- Quota is reserved before any part URL is issued and is released only after the S3 abort succeeds, or moved to `bytes_committed` only after the size check passes.
+- Expired sessions are rejected by the API and aborted by the sweeper. Multipart uploads with no session row are aborted after 15 minutes. Object-storage lifecycle still aborts incomplete uploads after one day. A hard bucket quota is a disk backstop.
+- `upload_sessions` gained `part_count`, `error_code`, `completion_token`, `completion_started_at`, and a nullable `s3_upload_id`, plus checks that keep part geometry consistent.
 - Upload verification failure moves a video from `uploading` to `failed` and does not allow processing retry.
-- MinIO root credentials are isolated from the API, worker, edge, and frontend. `media-app` gets the explicit bucket policy. CORS, ETag exposure, hostname, and outage behavior are specified.
+- Storage admin credentials are isolated from the API, worker, edge, and frontend. `media-app` is scoped to the bucket. CORS, ETag exposure, hostname, and outage behavior are specified.
 - `ubuntu-up.sh` gained preflight checks, volume protection, migration failure handling, startup order, ready validation, and idempotent repeat runs. Backup verification uses `pg_restore -l`.
 - Private-video tests now cover anonymous access, unauthorized users, grantees, revoked grants, playlists, segments, expired and revoked playback sessions, moderator limits, hide and restore, and object-URL exposure. Each test names the stage that automates it.
 
@@ -440,7 +458,7 @@ A presigned `PUT` without a signed length can fill the disk while the database s
 ### Remaining risks
 
 - A segment download that has already started can finish after a revoke or hide. The next request fails. The transfer URL lives at most two minutes.
-- MinIO's own process still has root credentials. Container-environment access is administrative access.
+- The SeaweedFS process still holds the storage-admin identity. Container-environment access is administrative access.
 - HLS output can push a user over `bytes_limit` after a successful transcode. New uploads are then blocked. The stored objects are not deleted automatically.
 - The audit trigger can be disabled by the table owner.
 - The bucket quota limits total damage from a signing bug. It does not attribute bytes to a user.
@@ -452,12 +470,12 @@ A presigned `PUT` without a signed length can fill the disk while the database s
 
 | Decision | What to prove | When |
 | --- | --- | --- |
-| SigV4 includes `content-length` in `SignedHeaders` for `UploadPart` | An oversized `PUT` returns 403 from the pinned MinIO and stores no part | Stage 4 |
-| Caddy forwards `Host` and `Content-Length` without breaking the signature | The same `PUT` succeeds when sent through `S3_PUBLIC_BASE_URL`, not only against `minio:9000` | Stage 4 and the stage 12 rehearsal |
+| SigV4 includes `content-length` in `SignedHeaders` for `UploadPart` | An oversized `PUT` returns 403 from the S3 gateway and stores no part | Stage 4 |
+| Caddy forwards `Host` and `Content-Length` without breaking the signature | The same `PUT` succeeds when sent through `S3_PUBLIC_ENDPOINT_URL`, not only against `seaweedfs:8333` | Stage 4 and the stage 12 rehearsal |
 | Browser `fetch` or XHR sends the signed length for a `Blob` body | The upload screen completes a real file | Stage 4 |
-| Bucket policy written by `minio-init` matches section 5.2 of the security document, including on a second run | Unsigned `GET` and `PUT` return 403, and the second run does not rotate `media-app` | Stage 4 and stage 12 |
+| Bucket privacy written by `s3-init` matches section 5.2 of the security document, including on a second run | Unsigned `GET` and `PUT` return 403, and the second run does not rotate `media-app` | Stage 4 and stage 12 |
 | API environment cannot see root credentials | Process environment assertion | Stage 1 |
 | Alembic revisions roll back on failure | Throwaway bad revision, documented in stage 12, not shipped | Stage 12 |
 | Native HLS on iOS follows the segment 302 | Device test. The longer-lived playlist fallback stays off until this fails | Stage 6 |
 
-No technology was added or removed. PostgreSQL remains the job queue. Playback remains an API playlist plus a short redirect. The install command remains `bash deploy/ubuntu-up.sh`.
+The stage 00 review did not change the stack. ADR-034 later replaced the object store with SeaweedFS. PostgreSQL remains the job queue. Playback remains an API playlist plus a short redirect. The install command remains `bash deploy/ubuntu-up.sh`.

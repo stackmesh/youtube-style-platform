@@ -1,0 +1,14 @@
+---
+description: Stage boundaries, architecture, and verification habits
+alwaysApply: true
+---
+
+# General
+
+- Implement only the stage named in the task. Read `docs/DEVELOPMENT_PLAN.md` and the related architecture docs before coding.
+- Follow `docs/` when they specify a name, status, path, or dependency. Update the doc in the same change if a real constraint forces a difference, and state why.
+- Prefer a direct function over a new framework, base class, or plugin layer.
+- Keep a rule in one place. Do not copy it into a second service "for convenience".
+- Read secrets from the environment. Do not hardcode them and do not commit `.env` or `.env.seaweed-admin`.
+- Run the relevant tests and report the actual command output. Do not say a test passed unless it ran.
+- Do not claim a later stage is done.

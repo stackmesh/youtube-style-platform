@@ -1,0 +1,13 @@
+---
+description: React, TypeScript, and API client boundaries
+globs: frontend/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend
+
+- Keep TypeScript `strict` on. Do not silence errors with `any` unless a type is genuinely unknown and narrowed immediately.
+- Put HTTP calls in `src/api`. Components receive data and render loading, empty, and error states.
+- Build the shell from small components. Pages should read clearly on a phone-width viewport and on a desktop viewport.
+- Keep the access token in memory when authentication arrives. Do not write it to `localStorage` or `sessionStorage`.
+- Do not invent video cards, counts, or channels that the API does not return.

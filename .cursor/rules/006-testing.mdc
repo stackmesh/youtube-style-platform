@@ -1,0 +1,13 @@
+---
+description: How to write and report tests
+globs: "**/{tests,test}/**/*.{py,ts,tsx}"
+alwaysApply: false
+---
+
+# Testing
+
+- Cover each important behavior with an automated test in the same change.
+- Use PostgreSQL for tests that run SQL. Do not point those tests at SQLite.
+- A test that cannot run must fail with an explicit error. Do not mark it skipped to hide a broken dependency.
+- Report the command, the exit code, and the counts. Do not paraphrase a run that did not happen.
+- Health, migration, credential, and bucket-privacy checks are part of Stage 1 and must keep passing.
