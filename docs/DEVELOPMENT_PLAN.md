@@ -155,8 +155,10 @@ The one-command claim applies to install and start. It does not apply to restore
 - Register, login, refresh, logout, me.
 - Argon2id, JWT, refresh rotation, family reuse detection, epoch increment on logout.
 - Bootstrap admin command, run by the API entrypoint, that creates an admin only when none exists.
-- Channel read and update of name and description. Avatar upload can wait for the image helper in stage 4; the profile fields do not.
-- Frontend: register, login, logout, session restore on reload via the refresh cookie, auth context in memory.
+- Channel read and update of name and description. `GET /api/v1/channels/me` returns the owner's channel. Avatar upload waits for the image helper in stage 4; `avatar_url` stays null until then.
+- Frontend: register, login, profile, public channel page, logout, session restore on reload via the refresh cookie, auth context in memory.
+
+**Stage 2 notes:** Current user is `GET /api/v1/auth/me`. Email is stored on `users`; the handle and display name live on the one channel created during registration. A client-supplied role is ignored. Logout increments `session_epoch`, so the previous access token fails on the next request. There is no access-token denylist. Repeating logout with that same access token returns `401`. Playback-session revocation waits until stage 6 creates `playback_sessions`. Password reset and email verification stay out of scope (ADR-018). CORS credentials stay off.
 
 **Definition of done:**
 

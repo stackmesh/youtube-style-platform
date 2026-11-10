@@ -35,7 +35,7 @@ Presigned URLs are capabilities. They are created only after the API has authori
 | Credential | Lifetime | Storage | Presentation |
 | --- | --- | --- | --- |
 | Access JWT | 15 minutes | Browser memory only | `Authorization: Bearer` |
-| Refresh token | 14 days | SHA-256 hash in `refresh_tokens`. Raw value only in an `HttpOnly` cookie | Cookie `Path=/api/v1/auth`, `SameSite=Lax`, `Secure` when `COOKIE_SECURE=true` |
+| Refresh token | 14 days | SHA-256 hash in `refresh_tokens`. Raw value only in an `HttpOnly` cookie named `refresh_token` | Cookie `Path=/api/v1/auth`, `SameSite=Lax`, `Secure` when `COOKIE_SECURE=true`. Not stored in `localStorage` or `sessionStorage` |
 | Playback session | 6 hours | Row id in `playback_sessions` | Cookie `hls_session`, `HttpOnly`, `Path=/api/v1/videos/{video_id}/hls`, `SameSite=Lax` |
 
 JWT:
@@ -50,8 +50,9 @@ Refresh:
 
 - 256 bits of randomness, base64url encoded.
 - On refresh, the old row is revoked and a new row is inserted in the same family, in one transaction. The cookie is replaced.
+- The browser shares one in-flight refresh call. A second caller waits for that result instead of presenting the same token again. Two completed uses of one refresh token still revoke the family.
 - Presenting a refresh token whose row is already revoked revokes every token in that `family_id` and clears the cookie. This cuts off a stolen token after rotation.
-- Logout revokes the presented refresh token's family, sets `revoked_at` on every playback session for that user, and increments `users.session_epoch` in that same transaction.
+- Logout revokes the presented refresh token's family and increments `users.session_epoch` in that same transaction. Setting `revoked_at` on playback sessions is part of that transaction once `playback_sessions` exists in stage 6. Stage 2 does not create that table.
 - The access token is not stored in a denylist. Immediate logout works because the next request compares the token's `epoch` with `users.session_epoch` and rejects a mismatch.
 
 `session_epoch` is an integer column on `users`, not null, default 1.
@@ -70,7 +71,7 @@ The refresh route is cookie-authenticated and is safe against cross-site use bec
 
 Playback cookies are sent on same-site `GET` requests for playlists and segments. Those routes are read-only. `SameSite=Lax` is correct. `SameSite=None` is not used.
 
-The access token must not be placed in `localStorage` or `sessionStorage`.
+The access token must not be placed in `localStorage` or `sessionStorage`. CORS stays `allow_credentials=false`. The browser sends the refresh cookie on same-origin `/api/v1/auth` requests. Mutations other than refresh still require the bearer token.
 
 ### 2.4 Registration
 

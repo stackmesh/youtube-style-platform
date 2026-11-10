@@ -9,8 +9,10 @@ description = "Foundations for a YouTube-like video platform."
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14",
+  "argon2-cffi>=23.1",
   "boto3>=1.35",
   "fastapi>=0.115",
+  "pyjwt>=2.10",
   "psycopg[binary]>=3.2",
   "pydantic>=2.9",
   "pydantic-settings>=2.6",

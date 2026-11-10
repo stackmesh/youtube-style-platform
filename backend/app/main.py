@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.auth import router as auth_router
+from app.api.channels import router as channels_router
 from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError, error_payload
@@ -58,6 +60,8 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestIdMiddleware)
     app.include_router(health_router)
+    app.include_router(auth_router)
+    app.include_router(channels_router)
     _register_exception_handlers(app)
     return app
 
@@ -68,6 +72,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=error_payload(exc.code, exc.message, request_id_var.get(), exc.details),
+            headers=exc.headers,
         )
 
     @app.exception_handler(StarletteHTTPException)
