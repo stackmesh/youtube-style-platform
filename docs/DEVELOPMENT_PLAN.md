@@ -204,7 +204,7 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Definition of done:**
 
-- A browser integration or an API test using the S3 client uploads a small file through presigned part URLs, sending each part at the signed `content_length`, and reaches `uploaded` with one queued job. The job is not executed until stage 5, so the test asserts the job row and then cancels it.
+- A browser integration or an API test using the S3 client uploads a small file through presigned part URLs, sending each part at the signed `content_length`, and reaches `uploaded` with one queued job. Stage 04 also runs probe and thumbnail generation. The video stays `uploaded` after a successful inspection and becomes `failed` for invalid media. It is not marked `ready`. HLS remains Stage 05. The original plan to cancel the job before execution is superseded by that inspection, because a queued-only job would leave the file unchecked.
 - The stage 4 rows in [SECURITY_DESIGN.md](SECURITY_DESIGN.md) section 9.3 pass: part-number rejection, oversized `PUT` rejected by SeaweedFS, `ListParts` size mismatch, concurrent complete, duplicate complete, expired session, sweeper abort, quota lock, unsigned `PUT` denied, and bucket policy without a public principal.
 - Abort and expiry release `bytes_reserved` only after the multipart abort succeeds.
 - A thumbnail that is not an image is rejected, and a valid PNG is stored as JPEG without EXIF.

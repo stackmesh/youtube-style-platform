@@ -173,13 +173,14 @@ Related-video selection is rule-based, not a ranked model. The response is a lis
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. Reserves quota and starts multipart upload. Returns `session_id`, `part_size`, `part_count`, `expires_at`. `503 STORAGE_UNAVAILABLE` if SeaweedFS does not create the upload. The reservation is released in that case |
+| POST | `/api/v1/videos/{id}/upload` | owner | Body: `byte_size`, `content_type`. An `object_key` in the body is ignored. Reserves quota and starts multipart upload. Returns `session_id`, `status`, `part_size`, `part_count`, `expected_size`, `expires_at`. Rate limit 10/hour/user and 30/hour/IP, fail closed. `503 STORAGE_UNAVAILABLE` if SeaweedFS does not create the upload. The reservation is released in that case. `409 QUOTA_EXCEEDED` when the reservation would pass the quota |
+| GET | `/api/v1/videos/{id}/upload` | owner | Latest session for the video: status, sizes, expiry, and `error_code`. No object key and no storage credentials |
 | POST | `/api/v1/videos/{id}/upload/parts` | owner | Body: `part_numbers`. Returns `{ "parts": [{ "part_number", "url", "content_length", "expires_at" }] }`. `content_length` is the exact signed length. Part numbers outside `1 .. part_count`, duplicates, and batches over 20 are `422 UPLOAD_PART_INVALID`. Expired sessions are `409 UPLOAD_EXPIRED` |
 | POST | `/api/v1/videos/{id}/upload/complete` | owner | Body: `parts: [{part_number, etag}]`. Verifies `ListParts` and `HEAD` against `expected_size`, then enqueues processing. A finished session returns the current video. A concurrent second caller receives `409 UPLOAD_IN_PROGRESS` and `Retry-After: 5`. A size or part mismatch is `422 UPLOAD_REJECTED` and creates no job. A SeaweedFS outage before the upload is finalized is `503 STORAGE_UNAVAILABLE` and leaves the session retryable |
 | POST | `/api/v1/videos/{id}/upload/abort` | owner | Abort and release quota reservation. `204` |
 | PUT | `/api/v1/videos/{id}/thumbnail` | owner | Raw image body or multipart file. Re-encoded and stored. Limit 2 MB |
 | DELETE | `/api/v1/videos/{id}/thumbnail` | owner | Removes the custom thumbnail. Auto thumbnail remains. `204` |
-| GET | `/api/v1/videos/{id}/processing` | owner | Processing status, attempt, `error_code` when failed, no raw FFmpeg log |
+| GET | `/api/v1/videos/{id}/processing` | owner | Processing status, attempt, `error_code` when failed, duration, dimensions, and `auto_thumbnail_ready`. No FFmpeg log. A successful Stage 04 inspection leaves status `uploaded` |
 | POST | `/api/v1/videos/{id}/processing/retry` | owner | Manual retry when status is `failed` and attempts remain |
 
 The browser uploads parts to the returned URLs. It does not send the video to FastAPI.
