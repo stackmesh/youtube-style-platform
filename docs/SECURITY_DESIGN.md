@@ -1,6 +1,8 @@
 # Security Design
 
-**Status: design only. Nothing in this document is implemented.**
+**Status: identity, catalogue ACL, and private upload controls through Stage 04 are implemented. Playback, comments, and moderation routes are not.**
+
+Stage 04 does not put `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY` in the API. Presigned part URLs are the only storage capability the browser receives. They expire after `UPLOAD_PART_URL_TTL_SECONDS` (20 minutes by default), bind `Content-Length`, and cannot choose the object key. Anonymous `GET` of an original remains denied. Upload and processing errors returned to the client use stable codes and do not include FFmpeg command lines.
 
 This document defines how the platform authenticates users, authorizes actions, and resists the abuses that a video site attracts. It does not claim these controls have been built or tested.
 

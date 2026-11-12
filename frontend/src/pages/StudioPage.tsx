@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
+import { getProcessing, uploadVideoFile, validateVideoFile } from "../api/uploads";
 import {
   createVideo,
   deleteVideo,
@@ -31,6 +32,54 @@ export function StudioPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState("");
+  const [progress, setProgress] = useState<number | null>(null);
+  const [processing, setProcessing] = useState("");
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const location = useLocation();
+
+  useEffect(() => {
+    const state = location.state as { error?: string; message?: string } | null;
+    if (state?.error) {
+      setError(state.error);
+    }
+    if (state?.message) {
+      setMessage(state.message);
+    }
+  }, [location.state]);
+
+  useEffect(() => {
+    if (!ready || !user || !videoId) {
+      return;
+    }
+    let cancelled = false;
+    let timer = 0;
+    const watch = () => {
+      void getProcessing(videoId)
+        .then((status) => {
+          if (cancelled) {
+            return;
+          }
+          setProcessing(status.processing_status);
+          const waiting =
+            status.processing_status === "processing" ||
+            status.processing_status === "uploading" ||
+            (status.processing_status === "uploaded" && !status.auto_thumbnail_ready);
+          if (waiting) {
+            timer = window.setTimeout(watch, 3000);
+          }
+        })
+        .catch(() => undefined);
+    };
+    watch();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [ready, user, videoId]);
 
   useEffect(() => {
     if (!ready || !user) {
@@ -61,7 +110,7 @@ export function StudioPage() {
     const grantList = videoId
       ? getGrants(videoId).then((page) => {
           if (!cancelled) {
-            setGrants(page.items);
+            setGrants(page.items ?? []);
           }
         })
       : Promise.resolve();
@@ -88,11 +137,8 @@ export function StudioPage() {
     return <p>Log in to manage videos.</p>;
   }
 
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    setError("");
-    setMessage("");
-    const payload = {
+  function metadata() {
+    return {
       title,
       description,
       tags: tags
@@ -101,17 +147,79 @@ export function StudioPage() {
         .filter(Boolean),
       visibility,
     };
+  }
+
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (busyRef.current) {
+      return;
+    }
+    setError("");
+    setMessage("");
+    const payload = metadata();
     try {
       if (videoId) {
         await updateVideo(videoId, payload);
         setMessage("Video updated. It stays a draft until processing exists.");
       } else {
         const created = await createVideo(payload);
-        setMessage("Draft saved. Playback is not available yet.");
-        navigate(`/studio/${created.id}`);
+        navigate(`/studio/${created.id}`, {
+          state: { message: "Draft saved. Playback is not available yet." },
+        });
       }
     } catch (caught: unknown) {
       setError(caught instanceof ApiError ? caught.message : "Could not save the video.");
+    }
+  }
+
+  async function onUpload() {
+    if (busyRef.current) {
+      return;
+    }
+    setError("");
+    setMessage("");
+    setFileError("");
+    if (!file) {
+      setFileError("Choose a video file.");
+      return;
+    }
+    const problem = validateVideoFile(file);
+    if (problem) {
+      setFileError(problem);
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let savedId = videoId;
+    try {
+      if (savedId) {
+        await updateVideo(savedId, metadata());
+      } else {
+        const created = await createVideo(metadata());
+        savedId = created.id;
+      }
+      setProgress(0);
+      await uploadVideoFile(savedId, file, {
+        onProgress: setProgress,
+        signal: controller.signal,
+      });
+      navigate(`/studio/${savedId}`, {
+        state: { message: "Upload stored. Playback is not available yet." },
+      });
+    } catch (caught: unknown) {
+      const text = caught instanceof ApiError || caught instanceof Error ? caught.message : "The upload failed.";
+      if (savedId && savedId !== videoId) {
+        navigate(`/studio/${savedId}`, { state: { error: text } });
+        return;
+      }
+      setError(text);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      setProgress(null);
+      abortRef.current = null;
     }
   }
 
@@ -120,7 +228,7 @@ export function StudioPage() {
       <div>
         <h1 className="text-2xl font-semibold">Studio</h1>
         <p className="mt-2 text-sm text-muted">
-          Metadata only. Uploads and playback are not part of this stage.
+          Upload a video file. Playback stays unavailable until a later stage.
         </p>
         <Link to="/studio" className="mt-4 inline-block text-sm text-accent">
           New draft
@@ -180,8 +288,34 @@ export function StudioPage() {
             ))}
           </select>
         </label>
+        <label className="block text-sm">
+          Video file
+          <input
+            aria-label="Video file"
+            type="file"
+            accept="video/mp4,video/quicktime,video/webm,video/x-matroska,video/mpeg,.mp4,.mov,.webm,.mkv,.mpeg"
+            className="mt-1 block w-full text-sm"
+            onChange={(event) => {
+              const selected = event.target.files?.[0] ?? null;
+              setFile(selected);
+              setFileError(selected ? validateVideoFile(selected) ?? "" : "");
+            }}
+          />
+        </label>
+        {fileError ? (
+          <p role="alert" className="text-sm text-red-300">
+            {fileError}
+          </p>
+        ) : null}
+        {progress !== null ? (
+          <p className="text-sm" aria-live="polite">
+            Uploading {Math.round(progress * 100)}%
+          </p>
+        ) : null}
+        {processing ? <p className="text-sm text-muted">Processing status: {processing}</p> : null}
         <p className="text-sm text-muted">
           Public, unlisted, and private apply after the video is ready. A draft is not in the feed.
+          The player stays hidden until processing can publish the video.
         </p>
         {error ? (
           <p role="alert" className="text-sm text-red-300">
@@ -190,9 +324,30 @@ export function StudioPage() {
         ) : null}
         {message ? <p className="text-sm text-emerald-300">{message}</p> : null}
         <div className="flex gap-3">
-          <button type="submit" className="rounded-full bg-accent px-4 py-2 text-sm font-medium">
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-full bg-accent px-4 py-2 text-sm font-medium disabled:opacity-60"
+          >
             {videoId ? "Save changes" : "Create draft"}
           </button>
+          <button
+            type="button"
+            disabled={busy}
+            className="rounded-full border border-line px-4 py-2 text-sm disabled:opacity-60"
+            onClick={() => void onUpload()}
+          >
+            Upload video
+          </button>
+          {busy ? (
+            <button
+              type="button"
+              className="rounded-full border border-line px-4 py-2 text-sm"
+              onClick={() => abortRef.current?.abort()}
+            >
+              Cancel upload
+            </button>
+          ) : null}
           {videoId ? (
             <button
               type="button"
@@ -230,9 +385,9 @@ export function StudioPage() {
                 Grant access
               </button>
             </div>
-            {grants.length === 0 ? <p className="mt-3 text-sm text-muted">No grants.</p> : null}
+            {(grants ?? []).length === 0 ? <p className="mt-3 text-sm text-muted">No grants.</p> : null}
             <ul className="mt-3 space-y-2">
-              {grants.map((grant) => (
+              {(grants ?? []).map((grant) => (
                 <li key={`${grant.handle}-${grant.created_at}`} className="flex items-center justify-between text-sm">
                   <span>
                     @{grant.handle}

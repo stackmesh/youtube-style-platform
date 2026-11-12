@@ -204,6 +204,10 @@ class Video(Base):
             "processing_status <> 'ready' OR published_at IS NOT NULL",
             name="videos_ready_published_check",
         ),
+        CheckConstraint(
+            "source_sha256 IS NULL OR source_sha256 ~ '^[a-f0-9]{64}$'",
+            name="videos_source_sha256_check",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -249,6 +253,7 @@ class Video(Base):
     custom_thumbnail_key: Mapped[str | None] = mapped_column(Text)
     source_byte_size: Mapped[int | None] = mapped_column(BigInteger)
     source_content_type: Mapped[str | None] = mapped_column(Text)
+    source_sha256: Mapped[str | None] = mapped_column(String(64))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     search_vector: Mapped[str] = mapped_column(
         TSVECTOR,
@@ -305,5 +310,109 @@ class VideoAccessGrant(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    video: Mapped[Video] = relationship()
+
+
+class UploadStatus(enum.StrEnum):
+    initiated = "initiated"
+    completing = "completing"
+    completed = "completed"
+    aborted = "aborted"
+    expired = "expired"
+
+
+class JobStatus(enum.StrEnum):
+    queued = "queued"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class FailureClass(enum.StrEnum):
+    fatal = "fatal"
+    retryable = "retryable"
+
+
+upload_status_enum = ENUM(
+    UploadStatus,
+    name="upload_status",
+    create_type=False,
+    values_callable=_enum_values,
+)
+job_status_enum = ENUM(
+    JobStatus,
+    name="job_status",
+    create_type=False,
+    values_callable=_enum_values,
+)
+failure_class_enum = ENUM(
+    FailureClass,
+    name="failure_class",
+    create_type=False,
+    values_callable=_enum_values,
+)
+
+
+class UploadSession(Base):
+    __tablename__ = "upload_sessions"
+    __table_args__ = (
+        CheckConstraint("expected_size > 0", name="upload_sessions_size_check"),
+        CheckConstraint("part_size = 16777216", name="upload_sessions_part_size_check"),
+        CheckConstraint(
+            "part_count BETWEEN 1 AND 512",
+            name="upload_sessions_part_count_check",
+        ),
+        CheckConstraint(
+            "expected_size > (part_count - 1)::bigint * part_size "
+            "AND expected_size <= part_count::bigint * part_size",
+            name="upload_sessions_geometry_check",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    s3_upload_id: Mapped[str | None] = mapped_column(Text)
+    expected_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    part_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    part_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[UploadStatus] = mapped_column(upload_status_enum, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    completion_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    completion_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    video: Mapped[Video] = relationship()
+
+
+class VideoProcessingJob(Base):
+    __tablename__ = "video_processing_jobs"
+    __table_args__ = (CheckConstraint("attempt >= 1", name="video_processing_jobs_attempt_check"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[JobStatus] = mapped_column(job_status_enum, nullable=False)
+    failure_class: Mapped[FailureClass | None] = mapped_column(failure_class_enum)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    locked_by: Mapped[str | None] = mapped_column(Text)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
     video: Mapped[Video] = relationship()

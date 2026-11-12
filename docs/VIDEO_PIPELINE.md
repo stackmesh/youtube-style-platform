@@ -1,6 +1,12 @@
 # Video Pipeline
 
-**Status: design only. Nothing in this document is implemented.**
+**Status: upload, probe, and private thumbnails are implemented. HLS and the `ready` transition are not.**
+
+Stage 04 stores the original with multipart upload and then probes it. A successful probe sets duration, dimensions, `source_sha256`, and `auto_thumbnail_key`, and returns the video to `uploaded`. It does not set `processing_status = ready`, `published_at`, or `hls_master_key`. Discovery still treats `ready` as the publication gate, so an inspected file is not playable and is absent from the feed. Section 4.4 and the `ready` step in section 4.5 remain Stage 05.
+
+The client filename is not stored and is never used as an object key. The key is always `originals/{video_id}/source`. There is no separate media-asset table: the original and the thumbnails are the key columns on `videos`, and `source_sha256` is the integrity value recorded after the worker downloads the object. Upload states are `initiated`, `completing`, `completed`, `aborted`, and `expired`.
+
+SeaweedFS 4.53 signs `UploadPart` with `SignedHeaders=content-length;host`. The length is not a query parameter; the client must send that exact `Content-Length`. A multipart ETag is not a whole-object MD5, so completion checks part sizes and `HEAD` size with no tolerance. Presigned URLs use `S3_PUBLIC_ENDPOINT_URL` (`http://s3.localhost` locally). Internal list, complete, abort, head, and download calls use `S3_ENDPOINT_URL`. The bucket stays private. The local Caddy policy allows the browser to connect to `http://s3.localhost`.
 
 This document specifies how a video moves from a file on the user's machine to an HLS stream, how failures are recovered, and how private bytes stay private.
 
@@ -320,9 +326,10 @@ Disk guard: before download, free space in `WORK_DIR` must be at least `3 × sou
 
 ### 4.5 Finalize
 
-In one transaction:
+Stage 04 stops after the thumbnail. The success transaction sets the job to `succeeded` and the video back to `uploaded`, with `duration_seconds`, `width`, `height`, `auto_thumbnail_key`, and `source_sha256`. Quota `bytes_committed` increases by the thumbnail size even if that exceeds the user's limit. The transaction does not set `ready`, `published_at`, or `hls_master_key`. The sweeper inserts a job for an `uploaded` video only when duration or the auto thumbnail is still missing, so a finished inspection is not queued again.
 
-- job `succeeded`, `finished_at` set, lock cleared
+Stage 05 finalize, which is not implemented, does this in one transaction:
+
 - video `processing_status = ready`
 - `duration_seconds`, `width`, `height`, `hls_master_key`, `auto_thumbnail_key` set
 - `published_at = now()` if it is null

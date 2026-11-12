@@ -13,6 +13,7 @@ dependencies = [
   "boto3>=1.35",
   "fastapi>=0.115",
   "pyjwt>=2.10",
+  "pillow>=11.0",
   "psycopg[binary]>=3.2",
   "pydantic>=2.9",
   "pydantic-settings>=2.6",

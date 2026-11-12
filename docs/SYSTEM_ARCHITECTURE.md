@@ -1,6 +1,6 @@
 # System Architecture
 
-**Status: design only. Nothing in this document is implemented.**
+**Status: the local Compose layout, health checks, and the Stage 04 worker loops are implemented. HLS playback is not.**
 
 This document describes the runtime shape of the platform, how a request moves through it, and why each major technology is here.
 
@@ -127,12 +127,12 @@ Modules:
 
 ### 2.4 Worker
 
-A separate container of the worker image (FFmpeg installed), command equivalent to `python -m app.workers`.
+A separate container of the worker image (FFmpeg installed), command `python -m app.worker.main`.
 
-Two loops in one process:
+The process heartbeats every 15 seconds on a side thread so a probe does not expire readiness. Two loops run on the main thread:
 
-1. **Job loop.** Claim one processing job with `FOR UPDATE SKIP LOCKED`, run probe, thumbnail, transcode, upload, and finalize. Concurrency defaults to 1.
-2. **Sweeper loop.** Every 60 seconds: expire upload sessions, repair missing jobs, release stale locks, delete objects for soft-deleted videos, purge expired playback sessions and view-dedupe rows, refresh the worker heartbeat.
+1. **Job loop.** Claim one processing job with `FOR UPDATE SKIP LOCKED`. Stage 04 runs probe and a private JPEG thumbnail. It does not transcode HLS and does not set `ready`. Concurrency defaults to 1. Scratch lives under `WORK_DIR/{job_id}` and is deleted after the attempt. FFmpeg is a subprocess with a fixed argument list, `-nostdin`, and `-protocol_whitelist file,pipe`.
+2. **Sweeper loop.** Every 60 seconds: expire upload sessions, abort orphan multipart uploads older than 15 minutes, finish a stale `completing` row when `HEAD` matches, repair an `uploaded` video that still lacks duration or an auto thumbnail, and requeue a lock that has expired. Playback-session purge and soft-delete object cleanup stay later stages. The heartbeat is independent of this loop.
 
 One process is enough on one server. A second OS process would only add contention for CPU and disk. If transcode concurrency is later raised above 1, the claim query already supports multiple workers.
 
