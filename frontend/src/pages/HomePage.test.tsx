@@ -30,7 +30,7 @@ describe("home page", () => {
     render(<App />);
     expect(screen.getByText("Playback")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Service status" })).toBeTruthy();
-    expect(screen.getByPlaceholderText("Search is not available yet")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Search")).toBeTruthy();
   });
 
   it("shows a loading state while the health request is pending", () => {
@@ -45,7 +45,12 @@ describe("home page", () => {
   it("shows each dependency when the backend is ready", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify(healthy), { status: 200 })),
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).includes("/api/v1/videos")) {
+          return Response.json({ items: [], next_cursor: null });
+        }
+        return new Response(JSON.stringify(healthy), { status: 200 });
+      }),
     );
     renderHome();
     expect(await screen.findByText("All dependencies are ready.")).toBeTruthy();
@@ -58,15 +63,18 @@ describe("home page", () => {
   it("shows dependency failures returned by the API", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).includes("/api/v1/videos")) {
+          return Response.json({ items: [], next_cursor: null });
+        }
+        return new Response(
           JSON.stringify({
             status: "not_ready",
             checks: { postgres: "fail", redis: "ok", s3: "ok", worker: "fail" },
           }),
           { status: 503 },
-        ),
-      ),
+        );
+      }),
     );
     renderHome();
     expect(await screen.findByRole("alert")).toHaveProperty(
@@ -79,7 +87,10 @@ describe("home page", () => {
   it("shows an error when the health request fails", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).includes("/api/v1/videos")) {
+          return Response.json({ items: [], next_cursor: null });
+        }
         throw new Error("network down");
       }),
     );

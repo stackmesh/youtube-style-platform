@@ -17,6 +17,22 @@ def get_current_user(
 ) -> User:
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise _unauthenticated()
+    return _user_from_credentials(credentials, session)
+
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: Session = Depends(get_db),
+) -> User | None:
+    """Anonymous when no token is sent. A presented token that fails is still 401."""
+    if credentials is None or not credentials.credentials:
+        return None
+    if credentials.scheme.lower() != "bearer":
+        raise _unauthenticated()
+    return _user_from_credentials(credentials, session)
+
+
+def _user_from_credentials(credentials: HTTPAuthorizationCredentials, session: Session) -> User:
     settings = get_settings()
     try:
         claims = read_access_token(credentials.credentials, settings.jwt_secret.get_secret_value())

@@ -115,7 +115,7 @@ Modules:
 | --- | --- |
 | identity | Registration, login, refresh, logout, user active flag |
 | channels | Profile, subscriptions |
-| catalogue | Video metadata, feed, related videos, tags |
+| catalogue | Video metadata, ACL, feed, related videos, tags, grants |
 | uploads | Multipart sessions, quota reservation, thumbnail ingest |
 | processing | Job creation, status queries, retry requests |
 | playback | Playback sessions, playlist authorization, URL rewriting |

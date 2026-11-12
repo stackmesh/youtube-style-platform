@@ -105,7 +105,7 @@ Video summary, used in feed, search, channel lists, and related:
 }
 ```
 
-`thumbnail_url` is safe to put in an `<img>` because image requests do not send `Authorization`.
+`thumbnail_url` is safe to put in an `<img>` because image requests do not send `Authorization`. Stage 3 omits it. No thumbnail object exists yet, and the public thumbnail redirect arrives with playback.
 
 - Feed, search, related, and public channel cards include the same-origin URL `/api/v1/videos/{id}/thumbnail`. That route is public only for videos that are public, ready, visible, and not deleted. It redirects to a two-minute presigned `GET`.
 - Watch, studio, playlist, and moderation responses for a video that is private, unlisted, hidden, or not yet public include an absolute presigned thumbnail URL instead of the API path. The page refetches the resource if the image URL has expired.
@@ -242,7 +242,7 @@ Subscribing to one's own channel is `409 INVALID_STATE`.
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| GET | `/api/v1/search` | public | Query: `q` (1 to 100 characters), `type` = `video` \| `channel` \| `all`, `sort` = `relevance` \| `newest` \| `views`, `limit`, `cursor` |
+| GET | `/api/v1/search` | public | Query: `q` (1 to 100 characters), `type` = `video` \| `channel` \| `all`, `sort` = `relevance` \| `newest` \| `views`, `limit`, `cursor`, `channel_cursor` |
 
 Video results are public, ready, visible, not deleted. Channel results are handles and names. `sort=views` and `sort=newest` apply to videos. Channel results always use relevance. `type=all` returns two cursors:
 
@@ -253,7 +253,7 @@ Video results are public, ready, visible, not deleted. Channel results are handl
 }
 ```
 
-Empty `q` is `400`.
+A blank `q` is `400 INVALID_REQUEST`. `cursor` pages video results. `channel_cursor` pages channel results when `type=all`. Channel results match the text search or a handle prefix. Owner channel lists that include drafts are ordered by `created_at` because a draft has no `published_at`. The public channel list stays on `published_at`. Creating a video does not make it `ready`.
 
 ### 2.10 Reports and moderation
 

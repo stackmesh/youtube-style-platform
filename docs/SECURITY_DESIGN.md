@@ -102,7 +102,7 @@ A moderator cannot change their own role. An admin cannot demote or deactivate t
 
 ### 3.2 Video ACL
 
-Evaluated in the catalogue service, not in the router and not in the frontend.
+Evaluated by `viewer_can_see` in `app/catalogue/acl.py`, not in the router and not in the frontend. `require_visible_video` is the read path later stages call. Stage 3 uses it for detail, related videos, and every discovery query uses the same public predicate.
 
 A caller can **know that a video exists** when any of these is true:
 

@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_optional_user
+from app.api.videos import _summary_page
+from app.catalogue.schemas import VideoPageResponse
+from app.catalogue.service import list_channel_videos
 from app.db.models import User
 from app.db.session import get_db
 from app.identity.schemas import ChannelSummary, ChannelUpdateRequest, ErrorResponse
@@ -33,6 +36,23 @@ def update_my_channel(
     """Update the caller's name and description. Handle and owner stay fixed."""
     channel = update_own_channel(session, user, body.name, body.description)
     return _summary(channel)
+
+
+@router.get(
+    "/{handle}/videos",
+    response_model=VideoPageResponse,
+    response_model_exclude_none=True,
+    responses={404: _ERRORS[404]},
+)
+def channel_videos(
+    handle: str,
+    limit: int = Query(default=24, ge=1, le=50),
+    cursor: str | None = None,
+    viewer: User | None = Depends(get_optional_user),
+    session: Session = Depends(get_db),
+) -> VideoPageResponse:
+    """Public ready videos on a channel. The owner also sees drafts and other non-deleted states."""
+    return _summary_page(list_channel_videos(session, handle, viewer, cursor, limit))
 
 
 @router.get("/{handle}", response_model=ChannelSummary, responses={404: _ERRORS[404]})

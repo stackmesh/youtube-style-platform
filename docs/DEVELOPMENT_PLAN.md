@@ -160,6 +160,8 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Stage 2 notes:** Current user is `GET /api/v1/auth/me`. Email is stored on `users`; the handle and display name live on the one channel created during registration. A client-supplied role is ignored. Logout increments `session_epoch`, so the previous access token fails on the next request. There is no access-token denylist. Repeating logout with that same access token returns `401`. Playback-session revocation waits until stage 6 creates `playback_sessions`. Password reset and email verification stay out of scope (ADR-018). CORS credentials stay off.
 
+**Stage 3 notes:** Videos are created as `draft` and `private`. The catalogue API does not move a video to `ready`; that happens when processing finishes in stage 5, and `published_at` is set then. Discovery, search, related videos, and the public channel list only return ready, public, visible, non-deleted videos. A draft is visible to its owner and absent from those lists even if its visibility is `public`. Unlisted videos are readable by id and absent from those lists. Private videos are 404 unless the caller owns them or holds an active grant. Grants are addressed by handle. Changing visibility or a grant bumps `acl_version` and does not delete grant rows. `thumbnail_url` is omitted until a thumbnail object exists. Comment routes are stage 7 and will call `viewer_can_see`. The search endpoint from the API design is included here so the catalogue stage can check the search plan; stage 9 must not add a second search API.
+
 **Definition of done:**
 
 - Integration tests cover register, duplicate email, duplicate handle, login failure, refresh rotation, reuse revocation, logout rejecting the old access token, and a deactivated user.
@@ -287,8 +289,7 @@ The one-command claim applies to install and start. It does not apply to restore
 
 **Build:**
 
-- Query endpoints, `simple` text search, trigram on channel name and handle, sorts, cursors.
-- Frontend search page with sort control and empty state.
+- Already implemented with the catalogue in stage 3: `GET /api/v1/search`, video and channel results, sorts, cursors, and the search page. Do not add a second search API. Stage 9 stays the place to extend search if the catalogue tests leave a gap.
 
 **Definition of done:**
 

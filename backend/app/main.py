@@ -12,6 +12,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.auth import router as auth_router
 from app.api.channels import router as channels_router
 from app.api.health import router as health_router
+from app.api.search import router as search_router
+from app.api.videos import router as videos_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError, error_payload
 from app.core.logging import configure_logging, request_id_var
@@ -62,6 +64,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(channels_router)
+    app.include_router(videos_router)
+    app.include_router(search_router)
     _register_exception_handlers(app)
     return app
 

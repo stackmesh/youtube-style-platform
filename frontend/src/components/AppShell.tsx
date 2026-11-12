@@ -1,10 +1,20 @@
 import { Menu, Search } from "lucide-react";
-import { useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useState, type FormEvent } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 export function AppShell() {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const navigate = useNavigate();
+
+  function onSearch(event: FormEvent) {
+    event.preventDefault();
+    const q = query.trim();
+    if (q) {
+      navigate(`/search?q=${encodeURIComponent(q)}`);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-ink text-white">
@@ -23,14 +33,15 @@ export function AppShell() {
           </span>
           Playback
         </NavLink>
-        <form className="mx-auto hidden w-full max-w-xl md:block" role="search">
+        <form className="mx-auto hidden w-full max-w-xl md:block" role="search" onSubmit={onSearch}>
           <label className="relative block">
             <span className="sr-only">Search</span>
             <Search className="pointer-events-none absolute left-3 top-2.5 text-muted" size={18} />
             <input
-              disabled
-              placeholder="Search is not available yet"
-              className="w-full rounded-full border border-line bg-panel py-2 pl-10 pr-4 text-sm text-muted"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search"
+              className="w-full rounded-full border border-line bg-panel py-2 pl-10 pr-4 text-sm"
             />
           </label>
         </form>
@@ -65,8 +76,10 @@ function SidebarLink({ onNavigate }: { onNavigate: () => void }) {
   return (
     <nav aria-label="Primary" className="space-y-1">
       <Item to="/" label="Home" onNavigate={onNavigate} />
+      <Item to="/search" label="Search" onNavigate={onNavigate} />
       {user ? (
         <>
+          <Item to="/studio" label="Studio" onNavigate={onNavigate} />
           <Item to="/profile" label="Profile" onNavigate={onNavigate} />
           <Item to={`/channels/${user.channel.handle}`} label="Channel" onNavigate={onNavigate} />
           <p className="px-3 pt-4 text-sm">

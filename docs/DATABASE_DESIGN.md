@@ -528,6 +528,7 @@ Isolation level is Read Committed, which is PostgreSQL's default. Correctness co
 - Alembic is the only way the schema changes.
 - `0001_extensions` enables `citext` and `pg_trgm` only.
 - `0002_identity` creates `user_role`, `users`, `refresh_tokens`, `channels`, and `user_storage_quotas`, with their unique constraints, foreign keys, checks, and search indexes. It does not rewrite `0001_extensions`.
+- `0003_catalogue` creates `visibility`, `processing_status`, `moderation_status`, `videos`, `video_tags`, and `video_access_grants`. Downgrade drops those objects and leaves the identity tables and extensions in place.
 - Later migrations add the remaining tables, including the moderation audit trigger.
 - Later migrations are expand-then-contract when a column is renamed or a type changes. The first release is not expected to need online migrations across multiple servers, but destructive column drops still happen in a follow-up migration after the code stops reading them.
 - A migration test creates an empty database and runs `upgrade head`. Downgrade is written for each revision but is not a production rollback strategy. Production rollback is restore-from-backup if a migration is destructive.

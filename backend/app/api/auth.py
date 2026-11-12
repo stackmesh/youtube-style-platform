@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.api.cookies import REFRESH_COOKIE, clear_refresh_cookie, set_refresh_cookie
 from app.api.deps import get_current_user
+from app.api.network import client_ip
 from app.core.config import get_settings
 from app.core.exceptions import AppError, error_payload
 from app.core.logging import request_id_var
@@ -42,7 +43,7 @@ def register(
     body: RegisterRequest, request: Request, response: Response, session: Session = Depends(get_db)
 ) -> SessionResponse:
     """Create a user, channel, and quota. The role is always USER."""
-    enforce_rate_limit(f"rl:register:{_client_ip(request)}", 5, 3600)
+    enforce_rate_limit(f"rl:register:{client_ip(request)}", 5, 3600)
     user, access_token, refresh_token = register_account(
         session, body.email, body.password, body.handle, body.name
     )
@@ -55,7 +56,7 @@ def login(
     body: LoginRequest, request: Request, response: Response, session: Session = Depends(get_db)
 ) -> SessionResponse:
     """Check email and password. Failures use one message whether or not the account exists."""
-    address = _client_ip(request)
+    address = client_ip(request)
     enforce_rate_limit(f"rl:login:ip:{address}", 10, 900)
     enforce_rate_limit(f"rl:login:email:{normalize_email(body.email)}", 10, 900)
     user, access_token, refresh_token = login_account(session, body.email, body.password)
@@ -153,12 +154,3 @@ def _refresh_failure(response: Response) -> JSONResponse:
     clear_refresh_cookie(failed)
     clear_refresh_cookie(response)
     return failed
-
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[-1].strip() or "unknown"
-    if request.client is None:
-        return "unknown"
-    return request.client.host

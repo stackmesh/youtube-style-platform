@@ -113,21 +113,33 @@ describe("account forms", () => {
   });
 
   it("renders a public channel", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/refresh")) {
+        return Response.json(
+          { error: { code: "UNAUTHENTICATED", message: "Authentication is required.", details: [], request_id: null } },
+          { status: 401 },
+        );
+      }
+      if (url.includes("/videos")) {
+        return Response.json({ items: [], next_cursor: null });
+      }
+      return Response.json({
         handle: "studio",
         name: "Studio",
         description: "Field notes",
         avatar_url: null,
         subscriber_count: 0,
         viewer_subscribed: false,
-      }),
-    );
+      });
+    });
     render(
       <MemoryRouter initialEntries={["/channels/studio"]}>
-        <Routes>
-          <Route path="/channels/:handle" element={<ChannelPage />} />
-        </Routes>
+        <AuthProvider>
+          <Routes>
+            <Route path="/channels/:handle" element={<ChannelPage />} />
+          </Routes>
+        </AuthProvider>
       </MemoryRouter>,
     );
     expect((await screen.findByRole("heading", { name: "Studio" })).textContent).toBe("Studio");
