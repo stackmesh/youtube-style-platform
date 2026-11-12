@@ -486,6 +486,8 @@ Beyond primary keys, unique constraints, and the partial indexes above:
 | `videos_feed_idx` on `(published_at desc, id desc)` where `processing_status = ready` and `moderation_status = visible` and `visibility = public` and `deleted_at is null` | Home feed |
 | `videos_channel_idx` on `(channel_id, published_at desc, id desc)` where `deleted_at is null` | Channel video list. Visibility filter is applied in the query because owners see more than the public does |
 | `videos_search_idx` GIN on `search_vector` | Video search |
+| `refresh_tokens_family_id_idx` on `(family_id)` | Family revocation |
+| `refresh_tokens_user_id_idx` on `(user_id)` | Logout and deactivation |
 | `channels_search_idx` GIN on `search_vector` | Channel search |
 | `channels_handle_trgm` GIN on `handle` using `gin_trgm_ops` | Handle prefix and typo tolerance |
 | `channels_name_trgm` GIN on `name` using `gin_trgm_ops` | Channel name search |
@@ -513,7 +515,7 @@ Feed and search queries must be checked with `EXPLAIN` during the catalogue stag
 | Finalize job | Set job `succeeded`, set video `ready`, set media keys, set `published_at` if null |
 | Hide video | Set `hidden`, increment `acl_version`, resolve targeted reports, insert audit |
 | Change role | Update `users.role` and insert the audit row. Sessions stay valid. The next request reads the new role |
-| Logout | Revoke the refresh family, revoke playback sessions, increment `session_epoch` |
+| Logout | Revoke the refresh family and increment `session_epoch`. Playback-session revocation is added with that table in stage 6 |
 | Deactivate or ban | Set `is_active`, revoke refresh tokens, revoke playback sessions, increment `session_epoch`, insert audit |
 | Record view | Insert or update dedupe, increment `view_count` only when the dedupe window allows |
 
@@ -524,7 +526,10 @@ Isolation level is Read Committed, which is PostgreSQL's default. Correctness co
 ## 7. Migration policy
 
 - Alembic is the only way the schema changes.
-- The first migration enables extensions, enums, tables, indexes, and the audit trigger.
+- `0001_extensions` enables `citext` and `pg_trgm` only.
+- `0002_identity` creates `user_role`, `users`, `refresh_tokens`, `channels`, and `user_storage_quotas`, with their unique constraints, foreign keys, checks, and search indexes. It does not rewrite `0001_extensions`.
+- `0003_catalogue` creates `visibility`, `processing_status`, `moderation_status`, `videos`, `video_tags`, and `video_access_grants`. Downgrade drops those objects and leaves the identity tables and extensions in place.
+- Later migrations add the remaining tables, including the moderation audit trigger.
 - Later migrations are expand-then-contract when a column is renamed or a type changes. The first release is not expected to need online migrations across multiple servers, but destructive column drops still happen in a follow-up migration after the code stops reading them.
 - A migration test creates an empty database and runs `upgrade head`. Downgrade is written for each revision but is not a production rollback strategy. Production rollback is restore-from-backup if a migration is destructive.
 

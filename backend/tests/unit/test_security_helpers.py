@@ -64,6 +64,40 @@ def test_app_bucket_policy_is_private() -> None:
     assert policy_is_private(policy) is True
 
 
+def test_bootstrap_password_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql+psycopg://youtube:youtube@localhost/youtube",
+            redis_url="redis://localhost:6379/0",
+            s3_endpoint_url="http://seaweedfs:8333",
+            s3_public_endpoint_url="http://s3.localhost",
+            s3_access_key="media-app",
+            s3_secret_key="media-app-local-secret",
+            jwt_secret="dev-only-jwt-secret-change-me-32b!",
+            public_app_url="http://localhost",
+            cors_origins="http://localhost",
+        )
+
+
+def test_https_public_url_requires_secure_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "test-bootstrap-password")
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql+psycopg://youtube:youtube@localhost/youtube",
+            redis_url="redis://localhost:6379/0",
+            s3_endpoint_url="http://seaweedfs:8333",
+            s3_public_endpoint_url="http://s3.localhost",
+            s3_access_key="media-app",
+            s3_secret_key="media-app-local-secret",
+            jwt_secret="dev-only-jwt-secret-change-me-32b!",
+            public_app_url="https://example.com",
+            cookie_secure=False,
+            cors_origins="https://example.com",
+            bootstrap_admin_password="test-bootstrap-password",
+        )
+
+
 def test_upload_cap_cannot_exceed_part_budget() -> None:
     with pytest.raises(ValidationError):
         Settings(

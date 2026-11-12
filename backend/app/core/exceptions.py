@@ -14,6 +14,7 @@ class AppError(Exception):
         self.message = message
         self.status_code = status_code
         self.details = details or []
+        self.headers: dict[str, str] = {}
 
 
 def error_payload(

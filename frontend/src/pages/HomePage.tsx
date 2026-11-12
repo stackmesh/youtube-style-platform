@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { getReadiness, type ReadyResponse } from "../api/health";
+import { ApiError } from "../api/client";
+import { getFeed, type VideoSummary } from "../api/videos";
+import { VideoCard } from "../components/VideoCard";
 
 const labels = [
   ["postgres", "PostgreSQL"],
@@ -14,8 +17,40 @@ type View =
   | { kind: "degraded"; data: ReadyResponse }
   | { kind: "error"; message: string };
 
+type FeedView =
+  | { kind: "loading" }
+  | { kind: "empty" }
+  | { kind: "ready"; items: VideoSummary[]; cursor: string | null }
+  | { kind: "error"; message: string };
+
 export function HomePage() {
   const [view, setView] = useState<View>({ kind: "loading" });
+  const [feed, setFeed] = useState<FeedView>({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    getFeed()
+      .then((page) => {
+        if (cancelled) {
+          return;
+        }
+        setFeed(
+          page.items.length === 0
+            ? { kind: "empty" }
+            : { kind: "ready", items: page.items, cursor: page.next_cursor },
+        );
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof ApiError ? error.message : "Could not load videos.";
+        setFeed({ kind: "error", message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,12 +74,29 @@ export function HomePage() {
   }, []);
 
   return (
-    <section className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">Service status</h1>
+    <section className="mx-auto max-w-5xl">
+      <h1 className="text-2xl font-semibold">Home</h1>
+      <div className="mt-4">
+        {feed.kind === "loading" ? <p>Loading videos.</p> : null}
+        {feed.kind === "empty" ? <p className="text-sm text-muted">No published videos yet.</p> : null}
+        {feed.kind === "error" ? (
+          <p className="text-sm text-red-300" role="alert">
+            {feed.message}
+          </p>
+        ) : null}
+        {feed.kind === "ready" ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {feed.items.map((video) => (
+              <VideoCard key={video.id} video={video} />
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <h2 className="mt-10 text-xl font-semibold">Service status</h2>
       <p className="mt-2 text-sm text-muted">
-        This foundation checks the services the platform needs. Video browsing is not built yet.
+        These checks confirm the services the platform needs.
       </p>
-      <div className="mt-6">
+      <div className="mt-6 max-w-3xl">
         {view.kind === "loading" ? <p>Checking services</p> : null}
         {view.kind === "ready" ? <StatusList data={view.data} healthy /> : null}
         {view.kind === "degraded" ? <StatusList data={view.data} healthy={false} /> : null}

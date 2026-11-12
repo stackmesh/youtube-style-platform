@@ -1,9 +1,20 @@
 import { Menu, Search } from "lucide-react";
-import { useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useState, type FormEvent } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
 
 export function AppShell() {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const navigate = useNavigate();
+
+  function onSearch(event: FormEvent) {
+    event.preventDefault();
+    const q = query.trim();
+    if (q) {
+      navigate(`/search?q=${encodeURIComponent(q)}`);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-ink text-white">
@@ -22,14 +33,15 @@ export function AppShell() {
           </span>
           Playback
         </NavLink>
-        <form className="mx-auto hidden w-full max-w-xl md:block" role="search">
+        <form className="mx-auto hidden w-full max-w-xl md:block" role="search" onSubmit={onSearch}>
           <label className="relative block">
             <span className="sr-only">Search</span>
             <Search className="pointer-events-none absolute left-3 top-2.5 text-muted" size={18} />
             <input
-              disabled
-              placeholder="Search is not available yet"
-              className="w-full rounded-full border border-line bg-panel py-2 pl-10 pr-4 text-sm text-muted"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search"
+              className="w-full rounded-full border border-line bg-panel py-2 pl-10 pr-4 text-sm"
             />
           </label>
         </form>
@@ -39,20 +51,18 @@ export function AppShell() {
           <SidebarLink onNavigate={() => undefined} />
         </aside>
         {open ? (
-          <button
-            type="button"
-            aria-label="Close navigation"
-            className="fixed inset-0 z-30 bg-black/60 md:hidden"
-            onClick={() => setOpen(false)}
-          />
+          <>
+            <button
+              type="button"
+              aria-label="Close navigation"
+              className="fixed inset-0 z-30 bg-black/60 md:hidden"
+              onClick={() => setOpen(false)}
+            />
+            <aside className="fixed inset-y-0 left-0 z-40 w-64 border-r border-line bg-ink p-3 md:hidden">
+              <SidebarLink onNavigate={() => setOpen(false)} />
+            </aside>
+          </>
         ) : null}
-        <aside
-          className={`fixed inset-y-0 left-0 z-40 w-64 border-r border-line bg-ink p-3 transition md:hidden ${
-            open ? "translate-x-0" : "-translate-x-full"
-          }`}
-        >
-          <SidebarLink onNavigate={() => setOpen(false)} />
-        </aside>
         <main className="min-w-0 flex-1 p-4 md:p-6">
           <Outlet />
         </main>
@@ -62,17 +72,51 @@ export function AppShell() {
 }
 
 function SidebarLink({ onNavigate }: { onNavigate: () => void }) {
+  const { user, logout } = useAuth();
   return (
-    <nav aria-label="Primary">
-      <NavLink
-        to="/"
-        onClick={onNavigate}
-        className={({ isActive }) =>
-          `block rounded-lg px-3 py-2 text-sm ${isActive ? "bg-panel font-medium" : "hover:bg-panel"}`
-        }
-      >
-        Home
-      </NavLink>
+    <nav aria-label="Primary" className="space-y-1">
+      <Item to="/" label="Home" onNavigate={onNavigate} />
+      <Item to="/search" label="Search" onNavigate={onNavigate} />
+      {user ? (
+        <>
+          <Item to="/studio" label="Studio" onNavigate={onNavigate} />
+          <Item to="/profile" label="Profile" onNavigate={onNavigate} />
+          <Item to={`/channels/${user.channel.handle}`} label="Channel" onNavigate={onNavigate} />
+          <p className="px-3 pt-4 text-sm">
+            {user.channel.name}
+            <span className="mt-1 block text-xs text-muted">{user.role}</span>
+          </p>
+          <button
+            type="button"
+            className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-panel"
+            onClick={() => {
+              void logout();
+              onNavigate();
+            }}
+          >
+            Log out
+          </button>
+        </>
+      ) : (
+        <>
+          <Item to="/login" label="Log in" onNavigate={onNavigate} />
+          <Item to="/register" label="Create account" onNavigate={onNavigate} />
+        </>
+      )}
     </nav>
+  );
+}
+
+function Item({ to, label, onNavigate }: { to: string; label: string; onNavigate: () => void }) {
+  return (
+    <NavLink
+      to={to}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        `block rounded-lg px-3 py-2 text-sm ${isActive ? "bg-panel font-medium" : "hover:bg-panel"}`
+      }
+    >
+      {label}
+    </NavLink>
   );
 }

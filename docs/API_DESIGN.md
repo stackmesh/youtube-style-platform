@@ -105,7 +105,7 @@ Video summary, used in feed, search, channel lists, and related:
 }
 ```
 
-`thumbnail_url` is safe to put in an `<img>` because image requests do not send `Authorization`.
+`thumbnail_url` is safe to put in an `<img>` because image requests do not send `Authorization`. Stage 3 omits it. No thumbnail object exists yet, and the public thumbnail redirect arrives with playback.
 
 - Feed, search, related, and public channel cards include the same-origin URL `/api/v1/videos/{id}/thumbnail`. That route is public only for videos that are public, ready, visible, and not deleted. It redirects to a two-minute presigned `GET`.
 - Watch, studio, playlist, and moderation responses for a video that is private, unlisted, hidden, or not yet public include an absolute presigned thumbnail URL instead of the API path. The page refetches the resource if the image URL has expired.
@@ -136,7 +136,7 @@ These are on the public internet. They return status names and nothing else: no 
 | POST | `/api/v1/auth/register` | public | Create user, channel, quota. Body: `email`, `password`, `handle`, `name`. Sets refresh cookie. Returns access token and channel summary |
 | POST | `/api/v1/auth/login` | public | Body: `email`, `password`. Same session result as register |
 | POST | `/api/v1/auth/refresh` | refresh cookie | Rotates refresh token. Returns a new access token |
-| POST | `/api/v1/auth/logout` | user plus refresh cookie | Revokes the family, revokes playback sessions, increments `session_epoch`, clears the refresh cookie |
+| POST | `/api/v1/auth/logout` | user plus refresh cookie | Revokes the refresh family, increments `session_epoch`, clears the refresh cookie. Playback-session revocation joins this transaction in stage 6 |
 | GET | `/api/v1/auth/me` | user | User id, email, role, channel summary, quota summary |
 
 Login and register responses:
@@ -150,7 +150,9 @@ Login and register responses:
 }
 ```
 
-The refresh token is not in the JSON body.
+The refresh token is not in the JSON body. The cookie name is `refresh_token`. It is `HttpOnly`, `SameSite=Lax`, `Path=/api/v1/auth`, and `Secure` when `COOKIE_SECURE=true`. Access tokens expire after `expires_in` seconds (900 by default). Logout does not keep an access-token denylist: the next request rejects the old token because its `epoch` no longer matches `users.session_epoch`. A second logout that still presents that access token returns `401`.
+
+Password reset and email verification are not part of this API (ADR-018).
 
 ### 2.3 Videos and studio
 
@@ -213,9 +215,10 @@ Comments are plain text. The server stores and returns them as text. It does not
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| GET | `/api/v1/channels/{handle}` | optional | Channel profile |
+| GET | `/api/v1/channels/{handle}` | public | Channel profile. `viewer_subscribed` is false until subscriptions exist |
+| GET | `/api/v1/channels/me` | user | The caller's channel. Handle `me` cannot exist because handles are at least 3 characters, so this route does not hide a public channel |
 | GET | `/api/v1/channels/{handle}/videos` | optional | Public ready videos. Owner calling their own handle receives all non-deleted videos, with status fields |
-| PATCH | `/api/v1/channels/me` | user | Update `name` and `description`. Handle is not writable |
+| PATCH | `/api/v1/channels/me` | user | Update `name` and `description`. Handle and owner are not writable. There is no route that updates another user's channel |
 | PUT | `/api/v1/channels/me/avatar` | user | Image upload, same rules as thumbnails, 2 MB |
 | DELETE | `/api/v1/channels/me/avatar` | user | `204` |
 | PUT | `/api/v1/channels/{handle}/subscription` | user | Subscribe. `204`. Idempotent |
@@ -239,7 +242,7 @@ Subscribing to one's own channel is `409 INVALID_STATE`.
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| GET | `/api/v1/search` | public | Query: `q` (1 to 100 characters), `type` = `video` \| `channel` \| `all`, `sort` = `relevance` \| `newest` \| `views`, `limit`, `cursor` |
+| GET | `/api/v1/search` | public | Query: `q` (1 to 100 characters), `type` = `video` \| `channel` \| `all`, `sort` = `relevance` \| `newest` \| `views`, `limit`, `cursor`, `channel_cursor` |
 
 Video results are public, ready, visible, not deleted. Channel results are handles and names. `sort=views` and `sort=newest` apply to videos. Channel results always use relevance. `type=all` returns two cursors:
 
@@ -250,7 +253,7 @@ Video results are public, ready, visible, not deleted. Channel results are handl
 }
 ```
 
-Empty `q` is `400`.
+A blank `q` is `400 INVALID_REQUEST`. `cursor` pages video results. `channel_cursor` pages channel results when `type=all`. Channel results match the text search or a handle prefix. Owner channel lists that include drafts are ordered by `created_at` because a draft has no `published_at`. The public channel list stays on `published_at`. Creating a video does not make it `ready`.
 
 ### 2.10 Reports and moderation
 
