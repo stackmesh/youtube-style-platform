@@ -24,6 +24,7 @@ from app.identity.passwords import (
 from app.identity.tokens import hash_refresh_token, issue_access_token, new_refresh_token
 
 logger = logging.getLogger(__name__)
+_REJECTED_BOOTSTRAP_PASSWORD = "unused-until-stage-2"
 
 
 def register_account(
@@ -139,7 +140,11 @@ def ensure_bootstrap_admin(session: Session) -> str:
         return "exists"
     email = normalize_email(settings.bootstrap_admin_email)
     password = settings.bootstrap_admin_password.get_secret_value()
-    if not email_is_valid(email) or not password_is_valid(password):
+    if (
+        password == _REJECTED_BOOTSTRAP_PASSWORD
+        or not email_is_valid(email)
+        or not password_is_valid(password)
+    ):
         raise SystemExit("bootstrap admin email or password does not meet the account rules")
     handle = _admin_handle(email)
     if _handle_exists(session, handle):

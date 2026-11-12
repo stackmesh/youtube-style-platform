@@ -73,11 +73,13 @@ Playback cookies are sent on same-site `GET` requests for playlists and segments
 
 The access token must not be placed in `localStorage` or `sessionStorage`. CORS stays `allow_credentials=false`. The browser sends the refresh cookie on same-origin `/api/v1/auth` requests. Mutations other than refresh still require the bearer token.
 
+The process refuses to start when `PUBLIC_APP_URL` uses `https` and `COOKIE_SECURE` is false. Local HTTP keeps `COOKIE_SECURE` false.
+
 ### 2.4 Registration
 
 Creates `users`, `channels`, and `user_storage_quotas` in one transaction. Role is always `USER`. A client-supplied role is ignored.
 
-The first `ADMIN` is created only by the bootstrap path when no admin exists. Bootstrap refuses to run if an admin already exists. The bootstrap password is not written to logs.
+The first `ADMIN` is created only by the bootstrap path when no admin exists. Bootstrap refuses to run if an admin already exists. `BOOTSTRAP_ADMIN_PASSWORD` is required. The historical placeholder `unused-until-stage-2` is rejected and is never stored. The bootstrap password is not written to logs.
 
 ## 3. Authorization
 

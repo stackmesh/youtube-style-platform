@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cors_origins: str
     bootstrap_admin_email: str = "admin@example.com"
-    bootstrap_admin_password: SecretStr = SecretStr("unused-until-stage-2")
+    bootstrap_admin_password: SecretStr
     max_upload_bytes: int = 2_147_483_648
     max_duration_seconds: int = 3600
     default_quota_bytes: int = 10_737_418_240
@@ -57,6 +57,12 @@ class Settings(BaseSettings):
         ceiling = self.part_size_bytes * self.max_parts
         if self.max_upload_bytes > ceiling:
             raise ValueError("MAX_UPLOAD_BYTES exceeds PART_SIZE_BYTES * MAX_PARTS")
+        return self
+
+    @model_validator(mode="after")
+    def secure_cookies_when_public_url_is_https(self) -> Self:
+        if self.public_app_url.lower().startswith("https://") and not self.cookie_secure:
+            raise ValueError("COOKIE_SECURE must be true when PUBLIC_APP_URL uses https")
         return self
 
     @property
