@@ -115,6 +115,25 @@ prune_backups() {
   done
 }
 
+check_docs_opt_in() {
+  local file="$1"
+  local opt_in="${2:-}"
+  local enabled="false"
+  if [[ -f "$file" ]]; then
+    enabled="$(awk -F= '$1=="DOCS_ENABLED" {print substr($0, index($0, "=")+1)}' "$file")"
+  fi
+  if [[ -z "$enabled" ]]; then
+    enabled="false"
+  fi
+  if [[ "$enabled" == "true" && "$opt_in" != "1" ]]; then
+    printf 'docs|DOCS_ENABLED=true would expose Swagger. Set DOCS_ENABLED=false in .env, or rerun with DOCS_OPT_IN=1 for a maintenance window and set it back to false afterward. Secrets were not changed.\n'
+    return 0
+  fi
+  if [[ "$enabled" == "true" && "$opt_in" == "1" ]]; then
+    printf 'warn|DOCS_OPT_IN=1 is exposing /docs for this run. Set DOCS_ENABLED=false and redeploy when maintenance is finished.\n'
+  fi
+}
+
 check_missing_volume() {
   local name="$1"
   case "$name" in

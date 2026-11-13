@@ -117,4 +117,125 @@ remaining="$(find "$keep" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 [[ "$remaining" -eq 14 ]]
 rm -rf "$keep"
 echo "retention kept ${remaining}"
+
+docs_off="$(mktemp)"
+printf 'DOCS_ENABLED=false\n' > "$docs_off"
+off_result="$(check_docs_opt_in "$docs_off" "")"
+[[ -z "$off_result" ]]
+echo "docs false is allowed"
+docs_on="$(mktemp)"
+printf 'DOCS_ENABLED=true\nJWT_SECRET=unchanged\n' > "$docs_on"
+before_docs="$(sha256sum "$docs_on" | awk '{print $1}')"
+on_result="$(check_docs_opt_in "$docs_on" "")"
+[[ "$on_result" == docs\|* ]]
+after_docs="$(sha256sum "$docs_on" | awk '{print $1}')"
+[[ "$before_docs" == "$after_docs" ]]
+echo "deploy: FAIL $on_result"
+opt_result="$(check_docs_opt_in "$docs_on" 1)"
+[[ "$opt_result" == warn\|* ]]
+echo "deploy: WARN ${opt_result#warn|}"
+rm -f "$docs_off" "$docs_on"
+
+install="$(mktemp -d)"
+mkdir -p "$install/deploy/caddy"
+(
+  set -euo pipefail
+  export DEPLOY_SOURCE_ONLY=1
+  # shellcheck source=deploy/ubuntu-up.sh
+  source "$ROOT/deploy/ubuntu-up.sh"
+  ROOT="$install"
+  DEMO_HTTP=1
+  HTTP_PORT=8088
+  write_env_if_missing
+  first_sum="$(sha256sum "$ROOT/.env" | awk '{print $1}')"
+  write_env_if_missing
+  second_sum="$(sha256sum "$ROOT/.env" | awk '{print $1}')"
+  [[ "$first_sum" == "$second_sum" ]]
+  python3 - "$ROOT/.env" <<'PY'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+values = {}
+for line in text.splitlines():
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key] = value
+assert values["DOCS_ENABLED"] == "false"
+assert values["CORS_ORIGINS"] == values["PUBLIC_APP_URL"] == "http://127.0.0.1:8088"
+assert values["COOKIE_SECURE"] == "false"
+assert values["TRUSTED_HOSTS"] == "127.0.0.1,localhost,s3.localhost"
+assert values["S3_PUBLIC_ENDPOINT_URL"] == "http://s3.localhost:8088"
+assert "S3_ADMIN_ACCESS_KEY" not in values
+assert "S3_ADMIN_SECRET_KEY" not in values
+PY
+  mode="$(stat -c '%a' "$ROOT/.env")"
+  [[ "$mode" == "600" ]]
+  render_caddy
+  if grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
+    exit 1
+  fi
+  python3 - "$ROOT/.env" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("DOCS_ENABLED=false", "DOCS_ENABLED=true"))
+PY
+  opted_sum="$(sha256sum "$ROOT/.env" | awk '{print $1}')"
+  DOCS_OPT_IN=""
+  render_caddy
+  if grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
+    exit 1
+  fi
+  [[ "$(sha256sum "$ROOT/.env" | awk '{print $1}')" == "$opted_sum" ]]
+  DOCS_OPT_IN=1
+  render_caddy
+  grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  [[ "$(sha256sum "$ROOT/.env" | awk '{print $1}')" == "$opted_sum" ]]
+)
+rm -rf "$install"
+
+tls="$(mktemp -d)"
+mkdir -p "$tls/deploy/caddy"
+(
+  set -euo pipefail
+  export DEPLOY_SOURCE_ONLY=1
+  # shellcheck source=deploy/ubuntu-up.sh
+  source "$ROOT/deploy/ubuntu-up.sh"
+  ROOT="$tls"
+  unset DEMO_HTTP
+  PUBLIC_DOMAIN=videos.example.com
+  ACME_EMAIL=ops@example.com
+  write_env_if_missing
+  python3 - "$ROOT/.env" <<'PY'
+import sys
+from pathlib import Path
+values = {}
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if not line or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key] = value
+assert values["DOCS_ENABLED"] == "false"
+assert values["COOKIE_SECURE"] == "true"
+assert values["PUBLIC_APP_URL"] == "https://videos.example.com"
+assert values["CORS_ORIGINS"] == values["PUBLIC_APP_URL"]
+assert values["S3_PUBLIC_ENDPOINT_URL"] == "https://s3.videos.example.com"
+assert values["TRUSTED_HOSTS"] == "videos.example.com,s3.videos.example.com"
+PY
+  render_caddy
+  caddy_text="$(cat "$ROOT/deploy/caddy/Caddyfile.runtime")"
+  grep -q 'Strict-Transport-Security' <<<"$caddy_text"
+  if grep -q "unsafe-inline" <<<"$caddy_text"; then
+    exit 1
+  fi
+  if grep -q "unsafe-eval" <<<"$caddy_text"; then
+    exit 1
+  fi
+  if grep -q '/docs' <<<"$caddy_text"; then
+    exit 1
+  fi
+)
+rm -rf "$tls"
+echo "first install keeps docs closed"
 echo "preflight selftest passed"

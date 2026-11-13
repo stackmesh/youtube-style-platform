@@ -29,7 +29,9 @@ Run it again after pulling a new revision. An existing `.env` and `.env.seaweed-
 
 Generated files are mode `600`. `JWT_SECRET`, the database password, the media key, and the storage-admin key are random. `S3_ADMIN_ACCESS_KEY` and `S3_ADMIN_SECRET_KEY` are only in `.env.seaweed-admin`. The API process exits if it sees them.
 
-`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. `DOCS_ENABLED` defaults to `false`, and the generated Caddy site does not route `/docs`. Set `DOCS_ENABLED=true` before the first install to publish Swagger.
+`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. A new install writes `DOCS_ENABLED=false`, and Caddy does not route `/docs`.
+
+An existing `.env` with `DOCS_ENABLED=true` makes the installer stop before it changes secrets or starts containers. The message is `deploy: FAIL docs`. To open Swagger for a maintenance window, set `DOCS_ENABLED=true` and run `DOCS_OPT_IN=1 bash deploy/ubuntu-up.sh`. When maintenance is finished, set `DOCS_ENABLED=false` and run the installer again. `DOCS_OPT_IN` is not written into `.env`.
 
 Demo mode is the only place `COOKIE_SECURE=false` is accepted.
 
@@ -41,10 +43,10 @@ The installer does not change UFW unless `DEPLOY_CONFIGURE_UFW=1`. With that fla
 
 | Image | Pin |
 | --- | --- |
-| PostgreSQL | `postgres:16-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139` |
+| PostgreSQL | `postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106` |
 | Redis | `redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7` |
 | SeaweedFS | `chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0` |
-| Caddy | `caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17` |
+| Caddy | `caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0` |
 | API and worker base | `python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df` |
 | Frontend build | `node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a` |
 
@@ -52,4 +54,12 @@ The API and worker images run as uid 10001. The worker image adds FFmpeg. The ed
 
 ## Image scan exception
 
-Trivy 0.58.2 on 2026-11-13 reported critical and high findings in the pinned base images. They are operating-system and runtime libraries, not application packages. Debian Bookworm packages in the API and worker images, including zlib and sqlite, have no fixed version in that scan. The worker image adds FFmpeg libraries with the same condition. Caddy 2.8 and Postgres 16 Alpine also carry upstream Go and Alpine fixes that require a newer image than the pinned digest. Those findings are accepted until a deliberate base-image bump. Redis 7 Alpine had one medium finding and no high or critical finding. SeaweedFS 4.53 had one high finding in `golang.org/x/net`.
+The 2026-11-13 remediation record is `docs/security/2026-11-13-container-baseline.md`. PostgreSQL is pinned to 16.16 and the edge image uses Caddy 2.11.9 because those images removed findings that had upstream fixes. The first start of an existing PostgreSQL 16 data directory on 16.16 is a minor-version restart. Take a backup before that start. This change does not start the database by itself.
+
+These findings remain because the current upstream image has no patched package:
+
+- API and worker: Debian Bookworm `zlib1g` `1:1.2.13.dfsg-1` (CVE-2023-45853) and `libsqlite3-0` `3.40.1-2+deb12u2` (CVE-2025-7458). Bookworm security has no newer candidate. The API uses PostgreSQL. SQLite is present because the Python base image ships it. The worker keeps FFmpeg, so `libaom3`, `libmbedcrypto7`, `libglib2.0-0`, and `libxml2` stay where Bookworm has no fixed version.
+- PostgreSQL 16.16: CVE-2025-68121 remains in `/usr/local/bin/gosu`, built with Go 1.24.6. The fixed Go releases are 1.24.13, 1.25.7, and 1.26.0-rc.3. `gosu` runs when the container starts.
+- Redis: the pinned image and the newer `redis:7-alpine` digest both have medium CVE-2026-4738 in `zlib` `1.3.2-r1`. The newer tag is Redis 7.4.12 and does not remove that finding, so the pin stays.
+- Caddy 2.11.9: high CVE-2026-116587 in `github.com/go-jose/go-jose/v3` `v3.0.5` has no fixed version. High CVE-2026-78661 in `golang.org/x/net` `v0.60.0` is fixed in 0.62.0, and this Caddy release still vendors 0.60.0. `2.11.9-alpine` is the current Alpine tag.
+- SeaweedFS 4.53, published 2026-11-08, is the newest release. `weed` includes `golang.org/x/net` `v0.61.0` (CVE-2026-78661), fixed in 0.62.0.

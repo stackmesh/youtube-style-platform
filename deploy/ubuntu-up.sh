@@ -134,7 +134,7 @@ render_caddy() {
   if [[ -f "$ROOT/.env" ]]; then
     docs_enabled="$(awk -F= '$1=="DOCS_ENABLED" {print substr($0, index($0, "=")+1)}' "$ROOT/.env")"
   fi
-  if [[ "$docs_enabled" == "true" ]]; then
+  if [[ "$docs_enabled" == "true" && "${DOCS_OPT_IN:-}" == "1" ]]; then
     api_paths="/api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json"
   fi
   umask 077
@@ -347,6 +347,7 @@ main() {
   fi
   write_env_if_missing
   apply_check "$(check_env_file "$ROOT/.env" "${DEMO_HTTP:-0}")"
+  apply_check "$(check_docs_opt_in "$ROOT/.env" "${DOCS_OPT_IN:-}")"
   if [[ ! -f "$ROOT/.env.seaweed-admin" ]]; then
     fail env ".env.seaweed-admin is missing. Restore it. The installer will not invent a second admin key while .env exists."
   fi
@@ -384,7 +385,14 @@ main() {
   printf 'Status: bash deploy/ops.sh status\n'
   printf 'Logs: bash deploy/ops.sh logs\n'
   printf 'Backup: bash deploy/backup.sh\n'
-  printf 'Swagger: %s/docs\n' "$public_url"
+  local docs_enabled="false"
+  docs_enabled="$(awk -F= '$1=="DOCS_ENABLED" {print substr($0, index($0, "=")+1)}' "$ROOT/.env")"
+  if [[ "$docs_enabled" == "true" && "${DOCS_OPT_IN:-}" == "1" ]]; then
+    printf 'Swagger: %s/docs\n' "$public_url"
+    printf 'deploy: WARN /docs is public for this run. Set DOCS_ENABLED=false and run the installer again when maintenance is finished.\n'
+  else
+    printf 'deploy: /docs is not routed.\n'
+  fi
 }
 
 if [[ "${DEPLOY_SOURCE_ONLY:-}" == "1" ]]; then
