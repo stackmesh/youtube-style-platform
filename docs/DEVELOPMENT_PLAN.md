@@ -342,6 +342,8 @@ The one-command claim applies to install and start. It does not apply to restore
 - Playwright completes the path above against Compose.
 - No known critical defect in ACL, quota, or job duplication remains open.
 
+**Hardening note:** Search is limited to 60 requests a minute per IP. Authenticated routes share a 120 request a minute backstop per user. JSON bodies above 256 KiB and other bodies above 2 MB return 413. Redis failure on those routes returns 503. `0007_indexes` adds the reply index. CI runs Ruff, backend unit tests, and the frontend suite. Playwright and the deployment scripts are still outstanding.
+
 ### Stage 12 — Single-command deployment
 
 **Depends on:** stage 11.

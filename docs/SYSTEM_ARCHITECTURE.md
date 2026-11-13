@@ -1,6 +1,6 @@
 # System Architecture
 
-**Status: the local Compose layout, health checks, HLS packaging, playback, reactions, comments, subscriptions, playlists, and moderation are implemented.**
+**Status: the local Compose layout, health checks, HLS packaging, playback, engagement, playlists, moderation, request limits, and rate limits are implemented. The single-command installer is not.**
 
 This document describes the runtime shape of the platform, how a request moves through it, and why each major technology is here.
 

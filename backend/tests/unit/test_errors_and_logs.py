@@ -72,6 +72,22 @@ def test_app_error_shape() -> None:
     assert response.json()["error"]["code"] == "VIDEO_NOT_FOUND"
 
 
+def test_oversized_json_is_rejected_without_echoing_the_body(caplog) -> None:
+    caplog.set_level(logging.INFO)
+    marker = "BODYMARKER" + ("x" * 300_000)
+    payload = b'{"email":"a@example.com","password":"' + marker.encode() + b'"}'
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/login",
+            content=payload,
+            headers={"content-type": "application/json"},
+        )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    assert "BODYMARKER" not in response.text
+    assert "BODYMARKER" not in " ".join(record.getMessage() for record in caplog.records)
+
+
 def test_openapi_lists_health_routes() -> None:
     schema = app.openapi()
     assert "/health/live" in schema["paths"]

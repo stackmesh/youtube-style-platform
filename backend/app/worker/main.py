@@ -93,7 +93,7 @@ def _claim_and_run(worker_id: str) -> bool:
         execute_claimed_job(session, job_id)
     except Exception:
         session.rollback()
-        logger.warning("processing job failed")
+        logger.warning("processing job failed job_id=%s", job_id)
     finally:
         session.close()
     return True

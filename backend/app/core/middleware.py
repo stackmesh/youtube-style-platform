@@ -11,6 +11,8 @@ from app.core.logging import request_id_var
 
 logger = logging.getLogger(__name__)
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+JSON_BODY_LIMIT = 256 * 1024
+REQUEST_BODY_LIMIT = 2_000_000
 
 
 class RequestIdMiddleware:
@@ -65,3 +67,62 @@ class RequestIdMiddleware:
                 status_code,
             )
             request_id_var.reset(token)
+
+
+class BodyLimitMiddleware:
+    """Stop oversized JSON and image bodies before the handler reads them."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+            await self.app(scope, receive, send)
+            return
+        headers = MutableHeaders(scope=scope)
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        limit = JSON_BODY_LIMIT if content_type == "application/json" else REQUEST_BODY_LIMIT
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                announced = int(declared)
+            except ValueError:
+                announced = limit + 1
+            if announced > limit:
+                await _reject_body(scope, receive, send)
+                return
+        body = bytearray()
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body.extend(message.get("body") or b"")
+            more = bool(message.get("more_body"))
+            if len(body) > limit:
+                await _reject_body(scope, receive, send)
+                return
+        sent = False
+
+        async def replay() -> Message:
+            nonlocal sent
+            if sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+async def _reject_body(scope: Scope, receive: Receive, send: Send) -> None:
+    response = JSONResponse(
+        status_code=413,
+        content=error_payload(
+            "PAYLOAD_TOO_LARGE",
+            "The request body is too large.",
+            request_id_var.get(),
+        ),
+    )
+    await response(scope, receive, send)

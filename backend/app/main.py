@@ -23,7 +23,7 @@ from app.api.videos import router as videos_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError, error_payload
 from app.core.logging import configure_logging, request_id_var
-from app.core.middleware import RequestIdMiddleware
+from app.core.middleware import BodyLimitMiddleware, RequestIdMiddleware
 from app.infrastructure.storage import assert_private_bucket
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,

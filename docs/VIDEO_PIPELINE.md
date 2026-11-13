@@ -293,7 +293,7 @@ The worker downloads `originals/{video_id}/source` to `{WORK_DIR}/{job_id}/sourc
 
 Failure here is **fatal**. The job is `failed` with `failure_class = fatal`, the video is `failed`, and no automatic retry is scheduled. The original is kept so the owner can inspect the failure. Scratch is deleted.
 
-FFmpeg is invoked with `-protocol_whitelist file,pipe` and `-nostdin`. It runs as the non-root worker user. A wall-clock timeout kills the process group: `min(3 hours, max(30 minutes, 4 × duration))`.
+FFmpeg is invoked with `-protocol_whitelist file,pipe` and `-nostdin`. It runs as the non-root worker user. A wall-clock timeout kills the process group: `min(3 hours, max(30 minutes, 4 × duration))`. The worker log line for a failed job includes the job id and does not include the presigned URL.
 
 ### 4.3 Thumbnail
 

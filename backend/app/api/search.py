@@ -1,12 +1,14 @@
 from enum import StrEnum
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
+from app.api.network import client_ip
 from app.api.videos import _summary_page
 from app.catalogue.schemas import ChannelHit, ChannelHitPage, SearchResponse, VideoPageResponse
 from app.catalogue.service import VideoCard, VideoPage
 from app.core.exceptions import AppError
+from app.core.rate_limit import enforce_rate_limit
 from app.db.session import get_db
 from app.identity.schemas import ErrorResponse
 from app.search.service import ChannelHits, VideoHits, search_channels, search_videos
@@ -35,6 +37,7 @@ class SearchSort(StrEnum):
     },
 )
 def search(
+    request: Request,
     q: str = Query(max_length=100),
     result_type: SearchType = Query(default=SearchType.all, alias="type"),
     sort: SearchSort = SearchSort.relevance,
@@ -44,6 +47,7 @@ def search(
     session: Session = Depends(get_db),
 ) -> SearchResponse:
     """Public catalogue search. Private, unlisted, draft, and hidden videos are not results."""
+    enforce_rate_limit(f"rl:search:{client_ip(request)}", 60, 60)
     query = q.strip()
     if not query:
         raise AppError("INVALID_REQUEST", "Enter a search query.", 400)

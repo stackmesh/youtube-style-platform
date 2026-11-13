@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
+from app.core.rate_limit import enforce_rate_limit
 from app.db.models import User, UserRole
 from app.db.session import get_db
 from app.identity.tokens import TokenError, read_access_token
@@ -41,6 +42,7 @@ def _user_from_credentials(credentials: HTTPAuthorizationCredentials, session: S
     user = session.get(User, claims.user_id)
     if user is None or not user.is_active or user.session_epoch != claims.epoch:
         raise _unauthenticated()
+    enforce_rate_limit(f"rl:user:{user.id}", 120, 60)
     return user
 
 

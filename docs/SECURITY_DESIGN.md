@@ -1,6 +1,6 @@
 # Security Design
 
-**Status: identity, catalogue ACL, private uploads, HLS, playback, reactions, comments, subscriptions, playlists, and moderation are implemented. Hardening and the single-command installer are not.**
+**Status: identity, catalogue, uploads, HLS, playback, engagement, playlists, moderation, and the hardening controls in this document are implemented. The single-command installer is not.**
 
 Stage 04 does not put `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY` in the API. Presigned part URLs are the only storage capability the browser receives. They expire after `UPLOAD_PART_URL_TTL_SECONDS` (20 minutes by default), bind `Content-Length`, and cannot choose the object key. Anonymous `GET` of an original remains denied. Upload and processing errors returned to the client use stable codes and do not include FFmpeg command lines.
 
@@ -405,3 +405,19 @@ Fixture: a `ready` private video with HLS objects, owner O, approved grantee G, 
 - There is no email verification, so disposable accounts can upload until quotas and rate limits stop them.
 - The SeaweedFS process holds the storage-admin identity because the S3 gateway has to load it. Those values are not in the API, worker, edge, or frontend environment. A person who can read that container environment can administer the bucket.
 - If a future change signs part URLs without `Content-Length`, a client can store parts larger than the reservation until the sweeper aborts them. The stage 4 oversized-`PUT` test is what keeps that regression visible. The bucket quota limits the damage and does not make the bug acceptable.
+
+## 11. Production checklist
+
+Before calling a host production-ready:
+
+- `JWT_SECRET` is at least 32 bytes and is not the example value. `COOKIE_SECURE=true` when `PUBLIC_APP_URL` is `https`.
+- API and worker environments do not contain `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY`.
+- Postgres, Redis, and SeaweedFS have no published ports. Only the edge listens publicly.
+- `GET /health/ready` is 200 with postgres, redis, s3, and worker `ok`.
+- The media bucket policy has no anonymous read and no `s3:*` for the application user.
+- A fresh `pg_dump -Fc` passes `pg_restore -l`, and a bucket mirror exists outside the web root.
+- Rate limits fail closed: stopping Redis makes login, search, and upload initiate return 503.
+
+Incident notes: a stolen access token works until expiry or until logout, ban, or deactivation bumps `session_epoch`. Hide a video to revoke its playback sessions. Do not log the presigned URL while investigating a playback report. A committed bad migration is restored from the dump, not downgraded in place.
+
+Accepted for this stage: the local Caddy policy allows Vite's inline scripts. A production build that serves hashed assets can drop `unsafe-inline` and `unsafe-eval`. Playwright is not part of the automated run yet. Comment rendering still loads authors per row; pages are capped at 50.
