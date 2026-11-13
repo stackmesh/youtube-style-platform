@@ -13,6 +13,7 @@ from app.api.auth import router as auth_router
 from app.api.channels import router as channels_router
 from app.api.health import router as health_router
 from app.api.images import router as images_router
+from app.api.playback import router as playback_router
 from app.api.search import router as search_router
 from app.api.uploads import router as uploads_router
 from app.api.videos import router as videos_router
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(channels_router)
     app.include_router(videos_router)
     app.include_router(uploads_router)
+    app.include_router(playback_router)
     app.include_router(images_router)
     app.include_router(search_router)
     _register_exception_handlers(app)

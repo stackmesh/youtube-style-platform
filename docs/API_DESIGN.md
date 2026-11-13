@@ -164,7 +164,7 @@ Password reset and email verification are not part of this API (ADR-018).
 | PATCH | `/api/v1/videos/{id}` | owner | Update title, description, tags, visibility. Bumps `acl_version` when visibility changes |
 | DELETE | `/api/v1/videos/{id}` | owner | Soft delete. `204` |
 | GET | `/api/v1/videos/{id}/related` | optional | Up to 20 public ready visible videos. Same tags first, then same channel. Excludes the current id |
-| POST | `/api/v1/videos/{id}/views` | optional | Count a view after playback start. `204`. No-op when the dedupe window has not elapsed |
+| POST | `/api/v1/videos/{id}/views` | playback cookie, optional bearer | Count a view after playback start. `204`. No-op when the 6-hour dedupe window has not elapsed. A playlist request does not call this |
 | GET | `/api/v1/me/videos` | user | Owner's videos, all statuses, cursor by `created_at` |
 
 Related-video selection is rule-based, not a ranked model. The response is a list of video summaries, not paginated, because the cap is 20.
@@ -189,7 +189,8 @@ The browser uploads parts to the returned URLs. It does not send the video to Fa
 
 | Method | Path | Auth | Behavior |
 | --- | --- | --- | --- |
-| POST | `/api/v1/videos/{id}/playback` | optional | ACL plus `ready`. Creates playback session, sets `hls_session` cookie, returns `{ "playlist_url": "/api/v1/videos/{id}/hls/master.m3u8" }` |
+| POST | `/api/v1/videos/{id}/playback` | optional | ACL plus `ready`. Creates or refreshes a playback session, sets `hls_session`, returns `{ "expires_at", "playlist_url" }`. `playlist_url` is the relative master path. The owner of a video that is not ready receives `409 VIDEO_NOT_READY` |
+| DELETE | `/api/v1/videos/{id}/playback` | optional | Revokes the presented session, and every active session for the authenticated user and this video. `204` |
 | GET | `/api/v1/videos/{id}/hls/master.m3u8` | playback cookie | Rewritten master playlist, `content-type` `application/vnd.apple.mpegurl`, `no-store` |
 | GET | `/api/v1/videos/{id}/hls/{rendition}/index.m3u8` | playback cookie | Variant playlist with relative segment names |
 | GET | `/api/v1/videos/{id}/hls/{rendition}/{segment}` | playback cookie | ACL check, then `302` to a two-minute presigned segment URL |

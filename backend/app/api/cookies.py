@@ -19,6 +19,33 @@ def set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
+HLS_COOKIE = "hls_session"
+
+
+def set_hls_cookie(response: Response, video_id: object, token: str, max_age: int) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key=HLS_COOKIE,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        path=f"/api/v1/videos/{video_id}",
+    )
+
+
+def clear_hls_cookie(response: Response, video_id: object) -> None:
+    settings = get_settings()
+    response.delete_cookie(
+        key=HLS_COOKIE,
+        path=f"/api/v1/videos/{video_id}",
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+    )
+
+
 def clear_refresh_cookie(response: Response) -> None:
     settings = get_settings()
     response.delete_cookie(

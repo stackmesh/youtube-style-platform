@@ -154,8 +154,12 @@ def update_video(
 def delete_video(session: Session, owner: User, video_id: uuid.UUID) -> None:
     video, _channel = _owned_video(session, owner, video_id)
     now = datetime.now(UTC)
+    from app.playback.service import release_deleted_quota, revoke_video_playback
+
     video.deleted_at = now
     video.updated_at = now
+    revoke_video_playback(session, video.id, now)
+    release_deleted_quota(session, owner, video)
     session.commit()
 
 

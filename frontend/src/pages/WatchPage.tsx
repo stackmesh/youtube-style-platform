@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { getRelated, getVideo, type VideoSummary } from "../api/videos";
 import { MediaPlaceholder, VideoCard } from "../components/VideoCard";
+import { VideoPlayer } from "../components/VideoPlayer";
 import { useAuth } from "../auth/AuthContext";
 
 export function WatchPage() {
@@ -57,7 +58,14 @@ export function WatchPage() {
   return (
     <article className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
       <div>
-        <MediaPlaceholder />
+        {video.processing_status && video.processing_status !== "ready" ? (
+          <div>
+            <MediaPlaceholder />
+            <p className="mt-2 text-sm text-muted">Status: {video.processing_status}</p>
+          </div>
+        ) : (
+          <VideoPlayer videoId={video.id} />
+        )}
         <h1 className="mt-4 text-2xl font-semibold">{video.title}</h1>
         <p className="mt-1 text-sm text-muted">
           <Link to={`/channels/${video.channel.handle}`} className="hover:underline">

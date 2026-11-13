@@ -525,7 +525,11 @@ def _repair_missing_jobs(session: Session) -> None:
         )
     ).all()
     for video in rows:
-        needs_media = video.duration_seconds is None or video.auto_thumbnail_key is None
+        needs_media = (
+            video.duration_seconds is None
+            or video.auto_thumbnail_key is None
+            or video.hls_master_key is None
+        )
         if (
             needs_media
             and _active_job_id(session, video.id) is None

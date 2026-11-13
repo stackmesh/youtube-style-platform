@@ -1,4 +1,4 @@
-"""Probe an uploaded original and store a private thumbnail. HLS stays in Stage 05."""
+"""Probe an uploaded original, store a private thumbnail, and publish private HLS."""
 
 import hashlib
 import json
@@ -109,7 +109,8 @@ def execute_claimed_job(session: Session, job_id: uuid.UUID) -> None:
         stored = head_size(key)
         if stored is None:
             raise MediaError("storage_error", fatal=False)
-        _succeed(session, job, video, probe, digest, key, stored)
+        master_key, hls_size = _package(source, work, probe, video.id)
+        _succeed(session, job, video, probe, digest, key, stored, master_key, hls_size)
     except MediaError as exc:
         _fail_job(session, job_id, exc)
     except StorageError:
@@ -223,6 +224,40 @@ def _reencode_jpeg(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _package(source: Path, work: Path, probe: ProbeResult, video_id: uuid.UUID) -> tuple[str, int]:
+    from app.uploads.hls import (
+        prepare_rendition_dirs,
+        relativize_variant,
+        rendition_command,
+        renditions_for,
+        transcode_timeout,
+        upload_tree,
+        validate_tree,
+        write_master,
+    )
+
+    renditions = renditions_for(probe.width, probe.height)
+    hls_root = prepare_rendition_dirs(work, renditions)
+    timeout = transcode_timeout(probe.duration_seconds)
+    for rendition in renditions:
+        directory = hls_root / rendition.name
+        try:
+            completed = _run(
+                rendition_command(source, rendition, probe),
+                timeout,
+                cwd=directory,
+                cpu_seconds=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MediaError("ffmpeg_timeout", fatal=False, detail=_stderr(exc.stderr)) from exc
+        if completed.returncode != 0:
+            raise MediaError("ffmpeg_failed", fatal=False, detail=_stderr(completed.stderr))
+        relativize_variant(directory / "index.m3u8")
+    write_master(hls_root, renditions)
+    validate_tree(hls_root, probe.duration_seconds)
+    return upload_tree(str(video_id), hls_root)
+
+
 def _succeed(
     session: Session,
     job: VideoProcessingJob,
@@ -231,14 +266,24 @@ def _succeed(
     digest: str,
     key: str,
     thumbnail_size: int,
+    master_key: str,
+    hls_size: int,
 ) -> None:
-    current_video = session.get(Video, video.id)
+    from app.uploads.objects import delete_prefix
+
+    current_video = session.scalar(select(Video).where(Video.id == video.id).with_for_update())
     current_job = session.get(VideoProcessingJob, job.id)
     if current_video is None or current_job is None:
         return
     if current_video.deleted_at is not None or current_job.status is JobStatus.cancelled:
+        try:
+            delete_prefix(f"hls/{video.id}/")
+        except StorageError:
+            pass
         current_job.status = JobStatus.cancelled
         current_job.finished_at = datetime.now(UTC)
+        current_job.locked_by = None
+        current_job.locked_until = None
         session.commit()
         return
     channel = session.get(Channel, current_video.channel_id)
@@ -250,7 +295,10 @@ def _succeed(
         .with_for_update()
     )
     if quota is not None:
-        quota.bytes_committed += thumbnail_size
+        if current_video.auto_thumbnail_key is None:
+            quota.bytes_committed += thumbnail_size
+        if current_video.hls_master_key is None:
+            quota.bytes_committed += hls_size
     now = datetime.now(UTC)
     current_job.status = JobStatus.succeeded
     current_job.finished_at = now
@@ -258,12 +306,15 @@ def _succeed(
     current_job.locked_until = None
     current_job.error_code = None
     current_job.failure_class = None
-    current_video.processing_status = ProcessingStatus.uploaded
+    current_video.processing_status = ProcessingStatus.ready
     current_video.duration_seconds = probe.duration_seconds
     current_video.width = probe.width
     current_video.height = probe.height
     current_video.auto_thumbnail_key = key
     current_video.source_sha256 = digest
+    current_video.hls_master_key = master_key
+    if current_video.published_at is None:
+        current_video.published_at = now
     session.commit()
 
 
@@ -346,13 +397,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
+def _run(
+    args: list[str], timeout: int, cwd: Path | None = None, cpu_seconds: int = 120
+) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(
         args,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
-        preexec_fn=_limit_process,
+        preexec_fn=_limiter(cpu_seconds),
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -363,12 +417,15 @@ def _run(args: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
-def _limit_process() -> None:
+def _limiter(cpu_seconds: int):
     import resource
 
-    cpu = 120
-    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+    def apply() -> None:
+        cpu = max(1, int(cpu_seconds))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (1024, 1024))
+
+    return apply
 
 
 def _stderr(payload: bytes | None) -> str:

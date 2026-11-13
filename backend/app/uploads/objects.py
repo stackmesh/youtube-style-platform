@@ -173,17 +173,89 @@ def delete_object(key: str) -> None:
         raise StorageError("delete_object") from exc
 
 
-def put_bytes(key: str, body: bytes, content_type: str) -> None:
+def put_bytes(key: str, body: bytes, content_type: str, cache_control: str | None = None) -> None:
+    extra: dict[str, str] = {}
+    if cache_control:
+        extra["CacheControl"] = cache_control
     try:
         storage_client().put_object(
             Bucket=get_settings().s3_bucket,
             Key=key,
             Body=body,
             ContentType=content_type,
+            **extra,
         )
     except (BotoCoreError, ClientError, OSError) as exc:
         logger.warning("put object failed")
         raise StorageError("put_object") from exc
+
+
+def get_bytes(key: str) -> bytes | None:
+    try:
+        response = storage_client().get_object(Bucket=get_settings().s3_bucket, Key=key)
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 404:
+            return None
+        logger.warning("get object failed")
+        raise StorageError("get_object") from exc
+    except (BotoCoreError, OSError) as exc:
+        logger.warning("get object failed")
+        raise StorageError("get_object") from exc
+    return response["Body"].read()
+
+
+def presign_get(key: str) -> str:
+    settings = get_settings()
+    try:
+        url = presigning_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.s3_bucket, "Key": key},
+            ExpiresIn=settings.playback_segment_ttl_seconds,
+        )
+    except (BotoCoreError, ClientError, OSError) as exc:
+        logger.warning("presign get failed")
+        raise StorageError("presign_get") from exc
+    secret = settings.s3_secret_key.get_secret_value()
+    if secret and secret in url:
+        raise StorageError("presign_get")
+    return url
+
+
+def prefix_size(prefix: str) -> int:
+    return sum(size for _key, size in _list_prefix(prefix))
+
+
+def delete_prefix(prefix: str) -> None:
+    client = storage_client()
+    bucket = get_settings().s3_bucket
+    try:
+        for key, _size in _list_prefix(prefix):
+            client.delete_object(Bucket=bucket, Key=key)
+    except (BotoCoreError, ClientError, OSError) as exc:
+        logger.warning("delete prefix failed")
+        raise StorageError("delete_prefix") from exc
+
+
+def _list_prefix(prefix: str) -> list[tuple[str, int]]:
+    client = storage_client()
+    bucket = get_settings().s3_bucket
+    found: list[tuple[str, int]] = []
+    token: str | None = None
+    try:
+        while True:
+            kwargs: dict[str, object] = {"Bucket": bucket, "Prefix": prefix}
+            if token is not None:
+                kwargs["ContinuationToken"] = token
+            page = client.list_objects_v2(**kwargs)
+            for item in page.get("Contents", []):
+                found.append((str(item["Key"]), int(item["Size"])))
+            if not page.get("IsTruncated"):
+                return found
+            token = str(page["NextContinuationToken"])
+    except (BotoCoreError, ClientError, OSError) as exc:
+        logger.warning("list prefix failed")
+        raise StorageError("list_prefix") from exc
 
 
 def get_to_path(key: str, path: str) -> None:

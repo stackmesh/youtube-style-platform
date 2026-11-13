@@ -8,6 +8,7 @@ from app.core.logging import configure_logging
 from app.db.session import SessionLocal
 from app.infrastructure.redis import redis_client
 from app.infrastructure.storage import check_bucket
+from app.playback.service import maintain_playback
 from app.uploads.media import claim_next_job, execute_claimed_job
 from app.uploads.service import sweep_uploads
 from app.worker.heartbeat import postgres_reachable, write_heartbeat
@@ -66,6 +67,11 @@ def _sweep() -> None:
     except Exception:
         session.rollback()
         logger.warning("upload sweep failed")
+    try:
+        maintain_playback(session)
+    except Exception:
+        session.rollback()
+        logger.warning("playback sweep failed")
     finally:
         session.close()
 

@@ -31,7 +31,7 @@ export function StudioPage() {
   const [grantHandle, setGrantHandle] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState("");
   const [progress, setProgress] = useState<number | null>(null);
@@ -83,11 +83,9 @@ export function StudioPage() {
 
   useEffect(() => {
     if (!ready || !user) {
-      setLoading(false);
       return;
     }
     let cancelled = false;
-    setLoading(true);
     setError("");
     const list = getMyVideos().then((page) => {
       if (!cancelled) {
@@ -122,7 +120,7 @@ export function StudioPage() {
       })
       .finally(() => {
         if (!cancelled) {
-          setLoading(false);
+          setLoaded(true);
         }
       });
     return () => {
@@ -130,11 +128,14 @@ export function StudioPage() {
     };
   }, [ready, user, videoId]);
 
-  if (!ready || loading) {
+  if (!ready) {
     return <p>Loading studio.</p>;
   }
   if (!user) {
     return <p>Log in to manage videos.</p>;
+  }
+  if (!loaded) {
+    return <p>Loading studio.</p>;
   }
 
   function metadata() {
@@ -206,7 +207,7 @@ export function StudioPage() {
         signal: controller.signal,
       });
       navigate(`/studio/${savedId}`, {
-        state: { message: "Upload stored. Playback is not available yet." },
+        state: { message: "Upload stored. Playback starts after processing finishes." },
       });
     } catch (caught: unknown) {
       const text = caught instanceof ApiError || caught instanceof Error ? caught.message : "The upload failed.";
@@ -228,7 +229,7 @@ export function StudioPage() {
       <div>
         <h1 className="text-2xl font-semibold">Studio</h1>
         <p className="mt-2 text-sm text-muted">
-          Upload a video file. Playback stays unavailable until a later stage.
+          Upload a video file. The watch page plays it after processing publishes HLS.
         </p>
         <Link to="/studio" className="mt-4 inline-block text-sm text-accent">
           New draft

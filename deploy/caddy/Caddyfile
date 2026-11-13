@@ -11,7 +11,7 @@ http://localhost, http://127.0.0.1 {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
-		Content-Security-Policy "default-src 'self'; connect-src 'self' http://s3.localhost ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+		Content-Security-Policy "default-src 'self'; connect-src 'self' http://s3.localhost ws: wss:; media-src 'self' http://s3.localhost; img-src 'self' data: http://s3.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
 	}
 
 	@api path /api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json

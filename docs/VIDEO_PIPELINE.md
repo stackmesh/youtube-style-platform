@@ -1,8 +1,12 @@
 # Video Pipeline
 
-**Status: upload, probe, and private thumbnails are implemented. HLS and the `ready` transition are not.**
+**Status: upload, probe, private thumbnails, HLS, the `ready` transition, and playback sessions are implemented.**
 
-Stage 04 stores the original with multipart upload and then probes it. A successful probe sets duration, dimensions, `source_sha256`, and `auto_thumbnail_key`, and returns the video to `uploaded`. It does not set `processing_status = ready`, `published_at`, or `hls_master_key`. Discovery still treats `ready` as the publication gate, so an inspected file is not playable and is absent from the feed. Section 4.4 and the `ready` step in section 4.5 remain Stage 05.
+A successful job probes the original, stores a private JPEG thumbnail, and packages HLS. The video becomes `ready` only after the master playlist, every variant playlist, and every referenced segment exist in the private bucket. `published_at` is set then if it was null. A failed or incomplete transcode leaves the video `uploaded` or `failed` and does not set `hls_master_key`. Discovery still treats `ready` as the publication gate.
+
+The ladder is 360p, 720p, and 1080p. A source is not upscaled. Heights below 360p produce one rendition at the source height, stored under the `360` prefix so the API allow-list stays `360`, `720`, and `1080`. There is no separate 480p rung. Audio is AAC-LC stereo at 48 kHz when the source has audio; a source without audio gets a generated stereo track of the probed duration. The pipeline does not create subtitle tracks. Segments are 6-second MPEG-TS files named `segment_00001.ts` onward. Keys are `hls/{video_id}/master.m3u8`, `hls/{video_id}/{rendition}/index.m3u8`, and `hls/{video_id}/{rendition}/segment_#####.ts`. A retry overwrites those keys.
+
+Playback sessions last 6 hours. The `hls_session` cookie path is `/api/v1/videos/{video_id}` so the same cookie is presented to playback create, playback end, the view ping, and the HLS routes, and is not sent for any other video. Logout and deactivation set `revoked_at` on that user's active playback sessions. A view is counted by `POST /api/v1/videos/{id}/views` after playback starts, once per viewer inside 6 hours. Fetching a playlist does not increment `view_count`.
 
 The client filename is not stored and is never used as an object key. The key is always `originals/{video_id}/source`. There is no separate media-asset table: the original and the thumbnails are the key columns on `videos`, and `source_sha256` is the integrity value recorded after the worker downloads the object. Upload states are `initiated`, `completing`, `completed`, `aborted`, and `expired`.
 
@@ -392,7 +396,7 @@ Why segment URLs are not embedded in the playlist: a VOD player often reads the 
 
 1. The client calls `POST /api/v1/videos/{id}/playback` with the bearer token, or without a token if the video is public or unlisted.
 2. The API checks `processing_status = ready`, `deleted_at is null`, moderation, and visibility. Hidden videos are playable by the owner and by moderators on the moderation route only.
-3. The API inserts a `playback_sessions` row expiring in 6 hours and sets the path-scoped `hls_session` cookie.
+3. The API inserts a `playback_sessions` row expiring in 6 hours, or extends that expiry when the presented cookie is still valid for this video and caller. It sets the `hls_session` cookie on `/api/v1/videos/{video_id}`. `DELETE /api/v1/videos/{id}/playback` revokes that session.
 4. The player loads `GET /api/v1/videos/{id}/hls/master.m3u8` with that cookie. `hls.js` uses credentials. Safari native HLS sends the cookie because the URL is same-site and the cookie path matches.
 5. The API loads the session, checks it is not revoked or expired, checks `video_id` matches, and re-reads the video ACL. A failed check returns 404 and revokes the session.
 6. The API reads the master playlist from SeaweedFS and rewrites variant URIs to relative API paths such as `720/index.m3u8`.

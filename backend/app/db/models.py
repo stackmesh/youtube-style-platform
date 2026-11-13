@@ -416,3 +416,34 @@ class VideoProcessingJob(Base):
     )
 
     video: Mapped[Video] = relationship()
+
+
+class PlaybackSession(Base):
+    __tablename__ = "playback_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    video: Mapped[Video] = relationship()
+
+
+class VideoViewDedupe(Base):
+    __tablename__ = "video_view_dedupe"
+
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), primary_key=True
+    )
+    viewer_key: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    last_viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    video: Mapped[Video] = relationship()

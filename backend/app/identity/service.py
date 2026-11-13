@@ -117,6 +117,9 @@ def logout_account(session: Session, user: User, raw_token: str | None) -> None:
             _revoke_user_tokens(session, user.id, now)
     else:
         _revoke_user_tokens(session, user.id, now)
+    from app.playback.service import revoke_user_playback
+
+    revoke_user_playback(session, user.id, now)
     user.session_epoch += 1
     user.updated_at = now
     session.commit()
@@ -125,10 +128,13 @@ def logout_account(session: Session, user: User, raw_token: str | None) -> None:
 def deactivate_user(session: Session, user: User) -> None:
     """Stop an account. There is no public route for this in stage 2."""
     now = datetime.now(UTC)
+    from app.playback.service import revoke_user_playback
+
     user.is_active = False
     user.session_epoch += 1
     user.updated_at = now
     _revoke_user_tokens(session, user.id, now)
+    revoke_user_playback(session, user.id, now)
     session.commit()
 
 

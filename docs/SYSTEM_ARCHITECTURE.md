@@ -1,6 +1,6 @@
 # System Architecture
 
-**Status: the local Compose layout, health checks, and the Stage 04 worker loops are implemented. HLS playback is not.**
+**Status: the local Compose layout, health checks, HLS packaging, and playback sessions are implemented. Reactions, comments, subscriptions, and moderation playback are not.**
 
 This document describes the runtime shape of the platform, how a request moves through it, and why each major technology is here.
 
@@ -131,8 +131,8 @@ A separate container of the worker image (FFmpeg installed), command `python -m 
 
 The process heartbeats every 15 seconds on a side thread so a probe does not expire readiness. Two loops run on the main thread:
 
-1. **Job loop.** Claim one processing job with `FOR UPDATE SKIP LOCKED`. Stage 04 runs probe and a private JPEG thumbnail. It does not transcode HLS and does not set `ready`. Concurrency defaults to 1. Scratch lives under `WORK_DIR/{job_id}` and is deleted after the attempt. FFmpeg is a subprocess with a fixed argument list, `-nostdin`, and `-protocol_whitelist file,pipe`.
-2. **Sweeper loop.** Every 60 seconds: expire upload sessions, abort orphan multipart uploads older than 15 minutes, finish a stale `completing` row when `HEAD` matches, repair an `uploaded` video that still lacks duration or an auto thumbnail, and requeue a lock that has expired. Playback-session purge and soft-delete object cleanup stay later stages. The heartbeat is independent of this loop.
+1. **Job loop.** Claim one processing job with `FOR UPDATE SKIP LOCKED`. The job probes the original, writes a private JPEG thumbnail, and packages HLS. It sets `ready` only after the playlists and segments validate. Concurrency defaults to 1. Scratch lives under `WORK_DIR/{job_id}` and is deleted after the attempt. FFmpeg is a subprocess with a fixed argument list, `-nostdin` on ffmpeg, and `-protocol_whitelist file,pipe`. FFprobe does not receive `-nostdin`. The transcode CPU limit matches its wall-clock timeout.
+2. **Sweeper loop.** Every 60 seconds: expire upload sessions, abort orphan multipart uploads older than 15 minutes, finish a stale `completing` row when `HEAD` matches, repair an `uploaded` video that still lacks duration, an auto thumbnail, or `hls_master_key`, requeue a lock that has expired, delete expired playback sessions and view-dedupe rows older than 48 hours, and delete objects for soft-deleted videos. The heartbeat is independent of this loop. Redis holds rate limits, the worker heartbeat, and the daily anonymous view salt.
 
 One process is enough on one server. A second OS process would only add contention for CPU and disk. If transcode concurrency is later raised above 1, the claim query already supports multiple workers.
 
