@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { getRelated, getVideo, type VideoSummary } from "../api/videos";
 import { MediaPlaceholder, VideoCard } from "../components/VideoCard";
+import { EngagementPanel } from "../components/EngagementPanel";
 import { VideoPlayer } from "../components/VideoPlayer";
 import { useAuth } from "../auth/AuthContext";
 
@@ -78,6 +79,12 @@ export function WatchPage() {
         <p className="mt-4 max-w-3xl whitespace-pre-wrap text-sm">
           {video.description || "No description yet."}
         </p>
+        <EngagementPanel
+          videoId={video.id}
+          likeCount={video.like_count ?? 0}
+          dislikeCount={video.dislike_count ?? 0}
+          viewerReaction={video.viewer_reaction ?? null}
+        />
         {video.tags && video.tags.length > 0 ? (
           <ul className="mt-4 flex flex-wrap gap-2">
             {video.tags.map((tag) => (

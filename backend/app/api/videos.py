@@ -71,7 +71,9 @@ def create(
     enforce_rate_limit(f"rl:videos:ip:{client_ip(request)}", 30, 3600)
     enforce_rate_limit(f"rl:videos:user:{user.id}", 10, 3600)
     return _detail(
-        create_video(session, user, body.title, body.description, body.tags, body.visibility)
+        create_video(session, user, body.title, body.description, body.tags, body.visibility),
+        session,
+        user,
     )
 
 
@@ -103,7 +105,7 @@ def detail(
     session: Session = Depends(get_db),
 ) -> VideoDetail:
     """Video metadata. Callers who fail the ACL receive 404."""
-    return _detail(read_video(session, video_id, viewer))
+    return _detail(read_video(session, video_id, viewer), session, viewer)
 
 
 @router.patch(
@@ -128,7 +130,9 @@ def update(
             description=body.description,
             tags=body.tags,
             visibility=body.visibility,
-        )
+        ),
+        session,
+        user,
     )
 
 
@@ -241,7 +245,15 @@ def _summary(card: VideoCard) -> VideoSummary:
     return payload
 
 
-def _detail(card: VideoCard) -> VideoDetail:
+def _detail(
+    card: VideoCard, session: Session | None = None, viewer: User | None = None
+) -> VideoDetail:
+    reaction = None
+    subscribed = False
+    if session is not None and viewer is not None:
+        from app.social.service import viewer_flags
+
+        reaction, subscribed = viewer_flags(session, viewer, card.video, card.channel)
     summary = _summary(card)
     return VideoDetail(
         **summary.model_dump(),
@@ -250,5 +262,6 @@ def _detail(card: VideoCard) -> VideoDetail:
         like_count=card.video.like_count,
         dislike_count=card.video.dislike_count,
         comment_count=card.video.comment_count,
-        viewer_subscribed=False,
+        viewer_reaction=reaction,
+        viewer_subscribed=subscribed,
     )

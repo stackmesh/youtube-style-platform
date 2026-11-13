@@ -1,6 +1,6 @@
 # API Design
 
-**Status: design for product routes. Stage 1 implements `/health/live` and `/health/ready` only.**
+**Status: catalogue, upload, playback, reactions, comments, subscriptions, playlists, and moderation routes are implemented. Search was included with the catalogue.**
 
 The HTTP API is the only interface the frontend and the test suite use. Base path: `/api/v1`. Interactive documentation is FastAPI's Swagger UI at `/docs`, backed by `/openapi.json`. ReDoc is at `/redoc`.
 
@@ -239,6 +239,14 @@ Subscribing to one's own channel is `409 INVALID_STATE`.
 | DELETE | `/api/v1/playlists/{id}` | owner | Hard delete playlist and items. Does not delete videos. `204` |
 | POST | `/api/v1/playlists/{id}/items` | owner | Body: `video_id`. Video must be one the owner can watch. Position assigned at the end |
 | DELETE | `/api/v1/playlists/{id}/items/{video_id}` | owner | `204` |
+| PATCH | `/api/v1/playlists/{id}/items` | owner | Body: `video_ids` in the desired order. The list must be the current set. Positions become `1000, 2000, ...` |
+| GET | `/api/v1/me/subscriptions` | user | Channels the caller subscribes to. Handles and names only |
+| GET | `/api/v1/me/subscriptions/videos` | user | Ready public videos from those channels, same cursor as the home feed |
+| GET | `/api/v1/channels/{handle}/subscribers` | owner | Subscriber handles. Anyone else receives 404. Emails are not returned |
+| POST | `/api/v1/comments/{id}/reports` | user | Same body as a video report. One open report per user per comment |
+| GET | `/api/v1/moderation/comment-reports` | moderator | Open comment reports by default |
+| POST | `/api/v1/moderation/comments/{id}/hide` | moderator | Hides the comment and removes it from public comment lists |
+| POST | `/api/v1/moderation/comments/{id}/restore` | moderator | Makes a hidden comment visible again |
 
 ### 2.9 Search
 

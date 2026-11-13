@@ -56,17 +56,27 @@ def channel_videos(
 
 
 @router.get("/{handle}", response_model=ChannelSummary, responses={404: _ERRORS[404]})
-def read_channel(handle: str, session: Session = Depends(get_db)) -> ChannelSummary:
+def read_channel(
+    handle: str,
+    viewer: User | None = Depends(get_optional_user),
+    session: Session = Depends(get_db),
+) -> ChannelSummary:
     """Return a public channel. Authentication is not required."""
-    return _summary(public_channel(session, handle))
+    channel = public_channel(session, handle)
+    subscribed = False
+    if viewer is not None:
+        from app.social.service import is_subscribed
+
+        subscribed = is_subscribed(session, viewer.id, channel.id)
+    return _summary(channel, subscribed)
 
 
-def _summary(channel) -> ChannelSummary:
+def _summary(channel, subscribed: bool = False) -> ChannelSummary:
     return ChannelSummary(
         handle=channel.handle,
         name=channel.name,
         description=channel.description,
         avatar_url=None,
         subscriber_count=channel.subscriber_count,
-        viewer_subscribed=False,
+        viewer_subscribed=subscribed,
     )

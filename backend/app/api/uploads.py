@@ -164,7 +164,7 @@ def finish_upload(
         video_id,
         [(part.part_number, part.etag) for part in body.parts],
     )
-    return _detail(read_video(session, video_id, user))
+    return _detail(read_video(session, video_id, user), session, user)
 
 
 @router.post(

@@ -1,6 +1,6 @@
 # System Architecture
 
-**Status: the local Compose layout, health checks, HLS packaging, and playback sessions are implemented. Reactions, comments, subscriptions, and moderation playback are not.**
+**Status: the local Compose layout, health checks, HLS packaging, playback, reactions, comments, subscriptions, playlists, and moderation are implemented.**
 
 This document describes the runtime shape of the platform, how a request moves through it, and why each major technology is here.
 

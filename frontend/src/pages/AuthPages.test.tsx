@@ -121,7 +121,7 @@ describe("account forms", () => {
           { status: 401 },
         );
       }
-      if (url.includes("/videos")) {
+      if (url.includes("/videos") || url.includes("/playlists")) {
         return Response.json({ items: [], next_cursor: null });
       }
       return Response.json({

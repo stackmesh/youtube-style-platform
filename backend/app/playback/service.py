@@ -17,8 +17,10 @@ from app.db.models import (
     PlaybackSession,
     ProcessingStatus,
     User,
+    UserRole,
     UserStorageQuota,
     Video,
+    VideoReport,
     VideoViewDedupe,
     Visibility,
 )
@@ -41,14 +43,25 @@ _ALLOWED_RENDITIONS = {"360", "720", "1080"}
 
 
 def open_playback(
-    session: Session, video_id: uuid.UUID, viewer: User | None, cookie_value: str | None
+    session: Session,
+    video_id: uuid.UUID,
+    viewer: User | None,
+    cookie_value: str | None,
+    *,
+    moderation_access: bool = False,
+    commit: bool = True,
 ) -> PlaybackSession:
-    video = _require_playable(session, video_id, viewer)
+    if moderation_access:
+        video = _require_ready(session, video_id)
+    else:
+        video = _require_playable(session, video_id, viewer)
     now = datetime.now(UTC)
     current = _matching_session(session, video_id, cookie_value, viewer)
     if current is not None and current.expires_at > now and current.revoked_at is None:
         current.expires_at = now + SESSION_TTL
-        session.commit()
+        current.moderation_access = current.moderation_access or moderation_access
+        if commit:
+            session.commit()
         return current
     if viewer is not None:
         session.execute(
@@ -65,10 +78,14 @@ def open_playback(
         user_id=None if viewer is None else viewer.id,
         video_id=video.id,
         expires_at=now + SESSION_TTL,
+        moderation_access=moderation_access,
         created_at=now,
     )
     session.add(created)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return created
 
 
@@ -251,6 +268,32 @@ def maintain_playback(session: Session) -> None:
         session.commit()
 
 
+def _require_ready(session: Session, video_id: uuid.UUID) -> Video:
+    video = session.get(Video, video_id)
+    if (
+        video is None
+        or video.deleted_at is not None
+        or video.processing_status is not ProcessingStatus.ready
+    ):
+        raise video_not_found()
+    return video
+
+
+def _moderation_session_allowed(session: Session, video: Video, viewer: User | None) -> bool:
+    if viewer is None or viewer.role not in (UserRole.MODERATOR, UserRole.ADMIN):
+        return False
+    if video.deleted_at is not None or video.processing_status is not ProcessingStatus.ready:
+        return False
+    if video.moderation_status is ModerationStatus.hidden:
+        return True
+    if video.visibility in (Visibility.public, Visibility.unlisted):
+        return True
+    report_id = session.scalar(
+        select(VideoReport.id).where(VideoReport.video_id == video.id).limit(1)
+    )
+    return report_id is not None
+
+
 def _require_playable(session: Session, video_id: uuid.UUID, viewer: User | None) -> Video:
     decision, video = _access(session, video_id, viewer)
     if decision == "not_ready":
@@ -267,6 +310,13 @@ def _authorized(
     now = datetime.now(UTC)
     if current is None or current.revoked_at is not None or current.expires_at <= now:
         raise video_not_found()
+    if current.moderation_access:
+        video = session.get(Video, video_id)
+        if video is None or not _moderation_session_allowed(session, video, viewer):
+            current.revoked_at = now
+            session.commit()
+            raise video_not_found()
+        return video
     decision, video = _access(session, video_id, viewer)
     if decision != "ok" or video is None:
         current.revoked_at = now

@@ -50,6 +50,7 @@ class VideoDetail(VideoSummary):
     like_count: int
     dislike_count: int
     comment_count: int
+    viewer_reaction: str | None = None
     viewer_subscribed: bool = False
 
 

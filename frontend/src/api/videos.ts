@@ -13,6 +13,11 @@ export type VideoSummary = {
   moderation_status?: string;
   description?: string;
   tags?: string[];
+  like_count?: number;
+  dislike_count?: number;
+  comment_count?: number;
+  viewer_reaction?: "like" | "dislike" | null;
+  viewer_subscribed?: boolean;
 };
 
 export type VideoPage = {

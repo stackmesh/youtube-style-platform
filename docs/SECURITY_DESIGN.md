@@ -1,6 +1,6 @@
 # Security Design
 
-**Status: identity, catalogue ACL, private uploads, HLS packaging, and playback authorization are implemented. Comments, reactions, subscriptions, and moderation routes are not.**
+**Status: identity, catalogue ACL, private uploads, HLS, playback, reactions, comments, subscriptions, playlists, and moderation are implemented. Hardening and the single-command installer are not.**
 
 Stage 04 does not put `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY` in the API. Presigned part URLs are the only storage capability the browser receives. They expire after `UPLOAD_PART_URL_TTL_SECONDS` (20 minutes by default), bind `Content-Length`, and cannot choose the object key. Anonymous `GET` of an original remains denied. Upload and processing errors returned to the client use stable codes and do not include FFmpeg command lines.
 

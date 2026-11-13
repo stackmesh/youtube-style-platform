@@ -80,6 +80,11 @@ function SidebarLink({ onNavigate }: { onNavigate: () => void }) {
       {user ? (
         <>
           <Item to="/studio" label="Studio" onNavigate={onNavigate} />
+          <Item to="/subscriptions" label="Subscriptions" onNavigate={onNavigate} />
+          <Item to="/playlists" label="Playlists" onNavigate={onNavigate} />
+          {user.role === "MODERATOR" || user.role === "ADMIN" ? (
+            <Item to="/moderation" label="Moderation" onNavigate={onNavigate} />
+          ) : null}
           <Item to="/profile" label="Profile" onNavigate={onNavigate} />
           <Item to={`/channels/${user.channel.handle}`} label="Channel" onNavigate={onNavigate} />
           <p className="px-3 pt-4 text-sm">

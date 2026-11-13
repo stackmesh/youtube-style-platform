@@ -13,9 +13,11 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, ENUM, TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import CITEXT, ENUM, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -430,6 +432,9 @@ class PlaybackSession(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    moderation_access: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -447,3 +452,219 @@ class VideoViewDedupe(Base):
     last_viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     video: Mapped[Video] = relationship()
+
+
+class ReactionValue(enum.StrEnum):
+    like = "like"
+    dislike = "dislike"
+
+
+class ReportReason(enum.StrEnum):
+    spam = "spam"
+    harassment = "harassment"
+    violence = "violence"
+    sexual = "sexual"
+    copyright = "copyright"
+    other = "other"
+
+
+class ReportStatus(enum.StrEnum):
+    open = "open"
+    dismissed = "dismissed"
+    action_taken = "action_taken"
+
+
+class PlaylistVisibility(enum.StrEnum):
+    public = "public"
+    unlisted = "unlisted"
+    private = "private"
+
+
+reaction_value_enum = ENUM(ReactionValue, name="reaction_value", create_type=False)
+report_reason_enum = ENUM(ReportReason, name="report_reason", create_type=False)
+report_status_enum = ENUM(ReportStatus, name="report_status", create_type=False)
+playlist_visibility_enum = ENUM(PlaylistVisibility, name="playlist_visibility", create_type=False)
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    subscriber_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class VideoReaction(Base):
+    __tablename__ = "video_reactions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), primary_key=True
+    )
+    value: Mapped[ReactionValue] = mapped_column(reaction_value_enum, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(body) >= 1 AND char_length(body) <= 2000",
+            name="comments_body_check",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("comments.id", ondelete="RESTRICT")
+    )
+    body: Mapped[str] = mapped_column(String(2000), nullable=False)
+    moderation_status: Mapped[ModerationStatus] = mapped_column(
+        moderation_status_enum,
+        nullable=False,
+        default=ModerationStatus.visible,
+        server_default="visible",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VideoReport(Base):
+    __tablename__ = "video_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), nullable=False
+    )
+    reporter_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    reason: Mapped[ReportReason] = mapped_column(report_reason_enum, nullable=False)
+    details: Mapped[str | None] = mapped_column(String(2000))
+    status: Mapped[ReportStatus] = mapped_column(
+        report_status_enum, nullable=False, default=ReportStatus.open, server_default="open"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CommentReport(Base):
+    __tablename__ = "comment_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    comment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("comments.id", ondelete="RESTRICT"), nullable=False
+    )
+    reporter_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    reason: Mapped[ReportReason] = mapped_column(report_reason_enum, nullable=False)
+    details: Mapped[str | None] = mapped_column(String(2000))
+    status: Mapped[ReportStatus] = mapped_column(
+        report_status_enum, nullable=False, default=ReportStatus.open, server_default="open"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Playlist(Base):
+    __tablename__ = "playlists"
+    __table_args__ = (CheckConstraint("char_length(title) >= 1", name="playlists_title_check"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(
+        String(2000), nullable=False, default="", server_default=""
+    )
+    visibility: Mapped[PlaylistVisibility] = mapped_column(
+        playlist_visibility_enum,
+        nullable=False,
+        default=PlaylistVisibility.private,
+        server_default="private",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PlaylistItem(Base):
+    __tablename__ = "playlist_items"
+    __table_args__ = (
+        UniqueConstraint("playlist_id", "position", name="playlist_items_position_key"),
+    )
+
+    playlist_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("playlists.id", ondelete="RESTRICT"), primary_key=True
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="RESTRICT"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ModerationAction(Base):
+    __tablename__ = "moderation_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('hide_video', 'restore_video', 'dismiss_report', 'change_role', "
+            "'deactivate_user', 'reactivate_user', 'view_private_video', 'hide_comment', "
+            "'restore_comment')",
+            name="moderation_actions_action_check",
+        ),
+        CheckConstraint(
+            "target_type IN ('video', 'report', 'user', 'comment')",
+            name="moderation_actions_target_check",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
