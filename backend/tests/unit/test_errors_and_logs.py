@@ -105,6 +105,21 @@ def test_untrusted_host_is_rejected(monkeypatch) -> None:
     assert allowed.status_code == 200
 
 
+def test_docs_are_hidden_when_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DOCS_ENABLED", "false")
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    try:
+        fresh = create_app()
+        with TestClient(fresh) as client:
+            response = client.get("/docs")
+    finally:
+        get_settings.cache_clear()
+    assert response.status_code == 404
+
+
 def test_openapi_lists_health_routes() -> None:
     schema = app.openapi()
     assert "/health/live" in schema["paths"]

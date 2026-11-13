@@ -84,6 +84,37 @@ check_disk() {
   fi
 }
 
+require_backup_root() {
+  local root="${BACKUP_ROOT:-/var/backups/youtube-clone}"
+  if [[ "$root" != /* || "$root" == "/" || "$root" == *..* || "$root" == */ ]]; then
+    printf 'backup|BACKUP_ROOT must be an absolute directory without a trailing slash or ..\n'
+    return 0
+  fi
+  printf '%s\n' "$root"
+}
+
+prune_backups() {
+  local base="$1"
+  local keep="${2:-14}"
+  local name
+  local -a names=()
+  mapfile -t names < <(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+  if [[ "${#names[@]}" -le "$keep" ]]; then
+    return 0
+  fi
+  local remove=$((${#names[@]} - keep))
+  local index=0
+  for name in "${names[@]}"; do
+    if [[ "$index" -ge "$remove" ]]; then
+      break
+    fi
+    index=$((index + 1))
+    if [[ "$name" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+      rm -rf "${base}/${name}"
+    fi
+  done
+}
+
 check_missing_volume() {
   local name="$1"
   case "$name" in

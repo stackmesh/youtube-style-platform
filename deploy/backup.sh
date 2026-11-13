@@ -18,15 +18,18 @@ if [[ "$ready" != *'"postgres":"ok"'* ]]; then
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-base="/var/backups/youtube-clone"
+base_result="$(require_backup_root)"
+if [[ "$base_result" == backup\|* ]]; then
+  fail "${base_result%%|*}" "${base_result#*|}"
+fi
+base="${base_result%$'\n'}"
 if [[ ! "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
   fail backup "The timestamp ${stamp} is not a safe directory name."
 fi
 dest="${base}/${stamp}"
-case "$dest" in
-  /var/backups/youtube-clone/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
-  *) fail backup "Refusing to write outside /var/backups/youtube-clone." ;;
-esac
+if [[ ! "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ || "$dest" != "${base}/${stamp}" ]]; then
+  fail backup "Refusing to write outside the backup root."
+fi
 if [[ -e "$dest" ]]; then
   fail backup "${dest} already exists. Wait one second and run the backup again."
 fi
@@ -54,19 +57,15 @@ if [[ -z "$api_cid" ]]; then
 fi
 docker exec "$api_cid" python -m app.infrastructure.mirror_bucket /tmp/media-backup
 docker cp "$api_cid:/tmp/media-backup" "$dest/media"
-docker exec "$api_cid" rm -rf /tmp/media-backup
+docker cp "$api_cid:/tmp/media-backup.manifest.json" "$dest/media.manifest.json"
+docker exec "$api_cid" rm -rf /tmp/media-backup /tmp/media-backup.manifest.json
+chmod 600 "$dest/media.manifest.json"
 chmod -R go-rwx "$dest/media" || true
-
-mapfile -t old < <(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
-keep=14
-if [[ "${#old[@]}" -gt "$keep" ]]; then
-  remove=$((${#old[@]} - keep))
-  for name in "${old[@]:0:remove}"; do
-    if [[ "$name" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
-      rm -rf "${base}/${name}"
-    fi
-  done
+if [[ ! -s "$dest/media.manifest.json" ]]; then
+  fail backup "The media manifest is empty. ${dest} was kept. The live bucket was not changed."
 fi
+
+prune_backups "$base" 14
 
 printf 'deploy: OK backup %s\n' "$dest"
 printf 'Sample cron, daily at 02:15 server local time, retention 14 dumps:\n'

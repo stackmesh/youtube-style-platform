@@ -17,7 +17,7 @@ http://localhost, http://127.0.0.1 {
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
-	@api path /api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json
+	@api path /api/* /health/*
 	handle @api {
 		reverse_proxy api:8000
 	}

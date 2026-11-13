@@ -101,4 +101,20 @@ echo "deploy: FAIL $admin"
 volume="$(check_missing_volume youtube-prod_pg_data)"
 [[ "$volume" == volume\|*missing* ]]
 echo "deploy: FAIL $volume"
+
+bad_root="$(BACKUP_ROOT=/tmp/../secrets require_backup_root)"
+[[ "$bad_root" == backup\|* ]]
+echo "deploy: FAIL $bad_root"
+keep="$(mktemp -d)"
+index=0
+while [[ "$index" -lt 16 ]]; do
+  printf -v name '202001%02dT000000Z' "$index"
+  mkdir "$keep/$name"
+  index=$((index + 1))
+done
+prune_backups "$keep" 14
+remaining="$(find "$keep" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+[[ "$remaining" -eq 14 ]]
+rm -rf "$keep"
+echo "retention kept ${remaining}"
 echo "preflight selftest passed"

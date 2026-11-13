@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -17,8 +19,8 @@ def main() -> None:
     bucket = settings.s3_bucket
     storage = storage_client()
     destination.mkdir(parents=True, exist_ok=True)
+    manifest: list[dict[str, object]] = []
     token = None
-    count = 0
     while True:
         kwargs: dict[str, object] = {"Bucket": bucket}
         if token:
@@ -33,11 +35,14 @@ def main() -> None:
                 raise SystemExit("refusing an object key that leaves the backup directory")
             target.parent.mkdir(parents=True, exist_ok=True)
             storage.download_file(bucket, key, str(target))
-            count += 1
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            manifest.append({"key": key, "size": target.stat().st_size, "sha256": digest})
         if not page.get("IsTruncated"):
             break
         token = page.get("NextContinuationToken")
-    print(f"mirrored {count} objects")
+    manifest_path = destination.with_name(destination.name + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"mirrored {len(manifest)} objects")
 
 
 if __name__ == "__main__":

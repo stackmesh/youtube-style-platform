@@ -63,7 +63,7 @@ write_env_if_missing() {
     cors="$public_url"
     cookie="false"
     trusted="127.0.0.1,localhost,s3.localhost"
-    docs="${DOCS_ENABLED:-true}"
+    docs="${DOCS_ENABLED:-false}"
   else
     domain="${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN or DEMO_HTTP=1}"
     if [[ -z "${ACME_EMAIL:-}" ]]; then
@@ -74,7 +74,7 @@ write_env_if_missing() {
     cors="$public_url"
     cookie="true"
     trusted="${domain},s3.${domain}"
-    docs="${DOCS_ENABLED:-true}"
+    docs="${DOCS_ENABLED:-false}"
   fi
   umask 077
   cat > "$ROOT/.env" <<EOF
@@ -129,6 +129,14 @@ render_caddy() {
   if [[ "$http_port" != "80" ]]; then
     s3_origin="http://s3.localhost:${http_port}"
   fi
+  local docs_enabled="false"
+  local api_paths="/api/* /health/*"
+  if [[ -f "$ROOT/.env" ]]; then
+    docs_enabled="$(awk -F= '$1=="DOCS_ENABLED" {print substr($0, index($0, "=")+1)}' "$ROOT/.env")"
+  fi
+  if [[ "$docs_enabled" == "true" ]]; then
+    api_paths="/api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json"
+  fi
   umask 077
   if [[ "${DEMO_HTTP:-}" == "1" ]]; then
     cat > "$dest" <<EOF
@@ -148,7 +156,7 @@ http://127.0.0.1, http://localhost {
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
-	@api path /api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json
+	@api path ${api_paths}
 	handle @api {
 		reverse_proxy api:8000
 	}
@@ -184,7 +192,7 @@ ${domain} {
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
-	@api path /api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json
+	@api path ${api_paths}
 	handle @api {
 		reverse_proxy api:8000
 	}
@@ -300,12 +308,14 @@ check_exposure() {
 
 configure_firewall() {
   if [[ "${DEPLOY_CONFIGURE_UFW:-}" != "1" ]]; then
-    printf 'deploy: firewall left unchanged. Set DEPLOY_CONFIGURE_UFW=1 to allow OpenSSH, 80, and 443.\n'
+    printf 'deploy: firewall left unchanged. Set DEPLOY_CONFIGURE_UFW=1 to deny incoming traffic except OpenSSH, 80/tcp, and 443/tcp.\n'
     return 0
   fi
   if ! command -v ufw >/dev/null 2>&1; then
     fail privilege "ufw is not installed. Install ufw or leave DEPLOY_CONFIGURE_UFW unset."
   fi
+  ufw default deny incoming
+  ufw default allow outgoing
   ufw allow OpenSSH
   ufw allow 80/tcp
   ufw allow 443/tcp

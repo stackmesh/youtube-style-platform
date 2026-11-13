@@ -29,9 +29,13 @@ Run it again after pulling a new revision. An existing `.env` and `.env.seaweed-
 
 Generated files are mode `600`. `JWT_SECRET`, the database password, the media key, and the storage-admin key are random. `S3_ADMIN_ACCESS_KEY` and `S3_ADMIN_SECRET_KEY` are only in `.env.seaweed-admin`. The API process exits if it sees them.
 
-`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. `DOCS_ENABLED=true` is written so `/docs` answers; set it to `false` and redeploy to hide Swagger and ReDoc.
+`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. `DOCS_ENABLED` defaults to `false`, and the generated Caddy site does not route `/docs`. Set `DOCS_ENABLED=true` before the first install to publish Swagger.
 
 Demo mode is the only place `COOKIE_SECURE=false` is accepted.
+
+## Firewall
+
+The installer does not change UFW unless `DEPLOY_CONFIGURE_UFW=1`. With that flag it sets the incoming policy to deny and the outgoing policy to allow, then allows OpenSSH, 80/tcp, and 443/tcp. PostgreSQL, Redis, and SeaweedFS ports are not allowed. Compose does not publish those ports.
 
 ## Images
 
@@ -45,3 +49,7 @@ Demo mode is the only place `COOKIE_SECURE=false` is accepted.
 | Frontend build | `node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a` |
 
 The API and worker images run as uid 10001. The worker image adds FFmpeg. The edge image contains the Vite production build and does not run the dev server.
+
+## Image scan exception
+
+Trivy 0.58.2 on 2026-11-13 reported critical and high findings in the pinned base images. They are operating-system and runtime libraries, not application packages. Debian Bookworm packages in the API and worker images, including zlib and sqlite, have no fixed version in that scan. The worker image adds FFmpeg libraries with the same condition. Caddy 2.8 and Postgres 16 Alpine also carry upstream Go and Alpine fixes that require a newer image than the pinned digest. Those findings are accepted until a deliberate base-image bump. Redis 7 Alpine had one medium finding and no high or critical finding. SeaweedFS 4.53 had one high finding in `golang.org/x/net`.

@@ -1,6 +1,8 @@
 # Backup and restore
 
-Backups live in `/var/backups/youtube-clone/<UTC timestamp>/` with mode `700` on the directory and `600` on the dump. The timestamp directory name is the only path component the scripts accept, which keeps a crafted name from leaving that directory.
+Backups live in `/var/backups/youtube-clone/<UTC timestamp>/` with mode `700` on the directory and `600` on the dump and the media manifest. Set `BACKUP_ROOT` to another absolute directory when that path is not writable. The value must not contain `..` or a trailing slash. The timestamp directory name is the only path component the scripts accept under that root.
+
+The media mirror includes `media.manifest.json` with the key, size, and SHA-256 of every object. `deploy/restore-rehearsal.sh` checks those hashes, loads the dump into a new database, copies the objects into a new bucket, reads the user count through SQLAlchemy, and reads one restored object through the application storage client. The application identity can read only the `media` bucket, so that object read uses a unique `acceptance/restore-probe` key which the rehearsal deletes before it exits. The scratch database and scratch bucket are removed at the end. The live database and the previous media objects are not deleted.
 
 `bash deploy/backup.sh` refuses to run unless Postgres is ready. It runs `pg_dump -Fc` with the PostgreSQL 16 client inside the database container, checks the archive with `pg_restore -l`, and copies the private `media` bucket to `media/` in the same directory. The live database is not dropped, truncated, or overwritten. Retention keeps the newest 14 timestamp directories. A sample cron line is printed at the end.
 
