@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     work_dir: str = "/var/lib/media-work"
     playback_segment_ttl_seconds: int = 120
     storage_startup_check: bool = True
+    docs_enabled: bool = True
+    trusted_hosts: str = ""
     worker_heartbeat_ttl_seconds: int = 90
     worker_heartbeat_max_age_seconds: int = 120
 
@@ -68,6 +70,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        return [host.strip().lower() for host in self.trusted_hosts.split(",") if host.strip()]
 
 
 @lru_cache

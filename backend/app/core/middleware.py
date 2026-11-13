@@ -116,6 +116,43 @@ class BodyLimitMiddleware:
         await self.app(scope, replay, send)
 
 
+class TrustedHostMiddleware:
+    """Reject requests whose Host header is outside the production allow-list.
+
+    An empty TRUSTED_HOSTS value leaves local development and the test client unchanged.
+    Health checks from inside the container use 127.0.0.1 and stay allowed.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from app.core.config import get_settings
+
+        allowed = set(get_settings().trusted_host_list)
+        if not allowed:
+            await self.app(scope, receive, send)
+            return
+        allowed.update({"127.0.0.1", "localhost"})
+        headers = MutableHeaders(scope=scope)
+        host = headers.get("host", "").split(":", 1)[0].strip().lower()
+        if host not in allowed:
+            response = JSONResponse(
+                status_code=400,
+                content=error_payload(
+                    "UNTRUSTED_HOST",
+                    "The host header is not allowed.",
+                    request_id_var.get(),
+                ),
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 async def _reject_body(scope: Scope, receive: Receive, send: Send) -> None:
     response = JSONResponse(
         status_code=413,

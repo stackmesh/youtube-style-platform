@@ -88,6 +88,23 @@ def test_oversized_json_is_rejected_without_echoing_the_body(caplog) -> None:
     assert "BODYMARKER" not in " ".join(record.getMessage() for record in caplog.records)
 
 
+def test_untrusted_host_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("TRUSTED_HOSTS", "videos.example")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        with TestClient(app) as client:
+            rejected = client.get("/health/live", headers={"Host": "evil.example"})
+            allowed = client.get("/health/live", headers={"Host": "videos.example"})
+    finally:
+        get_settings.cache_clear()
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "UNTRUSTED_HOST"
+    assert "evil.example" not in rejected.text
+    assert allowed.status_code == 200
+
+
 def test_openapi_lists_health_routes() -> None:
     schema = app.openapi()
     assert "/health/live" in schema["paths"]

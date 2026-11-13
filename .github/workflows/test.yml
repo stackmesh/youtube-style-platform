@@ -37,3 +37,15 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npx tsc --noEmit
+      - run: npm audit --audit-level=high
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject private keys and live admin secrets
+        run: |
+          if git grep -nE 'BEGIN (RSA |OPENSSH )?PRIVATE KEY|S3_ADMIN_SECRET_KEY=[^$].+' -- . ':!.env.example' ':!.env.seaweed-admin.example' ':!docs'; then
+            echo "possible secret in the tree"
+            exit 1
+          fi

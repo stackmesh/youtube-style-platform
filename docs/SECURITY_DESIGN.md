@@ -1,6 +1,6 @@
 # Security Design
 
-**Status: identity, catalogue, uploads, HLS, playback, engagement, playlists, moderation, and the hardening controls in this document are implemented. The single-command installer is not.**
+**Status: identity, catalogue, uploads, HLS, playback, engagement, playlists, moderation, hardening controls, and the production installer are implemented. A clean Ubuntu acceptance run is still required.**
 
 Stage 04 does not put `S3_ADMIN_ACCESS_KEY` or `S3_ADMIN_SECRET_KEY` in the API. Presigned part URLs are the only storage capability the browser receives. They expire after `UPLOAD_PART_URL_TTL_SECONDS` (20 minutes by default), bind `Content-Length`, and cannot choose the object key. Anonymous `GET` of an original remains denied. Upload and processing errors returned to the client use stable codes and do not include FFmpeg command lines.
 
@@ -420,4 +420,6 @@ Before calling a host production-ready:
 
 Incident notes: a stolen access token works until expiry or until logout, ban, or deactivation bumps `session_epoch`. Hide a video to revoke its playback sessions. Do not log the presigned URL while investigating a playback report. A committed bad migration is restored from the dump, not downgraded in place.
 
-Accepted for this stage: the local Caddy policy allows Vite's inline scripts. A production build that serves hashed assets can drop `unsafe-inline` and `unsafe-eval`. Playwright is not part of the automated run yet. Comment rendering still loads authors per row; pages are capped at 50.
+The production Caddyfile serves hashed assets with a Content-Security-Policy that does not use `unsafe-inline` or `unsafe-eval`. The development Caddyfile still allows those sources so the Vite dev server can run. `TRUSTED_HOSTS`, when set, rejects any other `Host`. An empty value keeps local development and the test client unchanged.
+
+Accepted risks that remain: npm audit could not be refreshed in this stage because the registry audit endpoint failed, so the Stage 07 findings stay in force. Critical: `tinypool` prototype pollution and `vitest` through its UI and mocker packages. High: Vite path traversal in optimized dependency source maps. Moderate: esbuild dev-server reads, `@vitest/mocker` path traversal, and React Router 6.30.6 open redirect via a backslash in `Link` or `useNavigate` (CVE-2025-68470). Vite, Vitest, esbuild, and tinypool are the local dev server and test runner. React Router links in this app are built from server-validated handles and UUIDs. Playwright was not installed, and a clean Ubuntu virtual machine was not available. Comment rendering still loads authors per row; pages are capped at 50.

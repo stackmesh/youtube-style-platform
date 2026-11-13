@@ -1,0 +1,195 @@
+# Production stack. No source mounts and no Vite dev server.
+# Private data services publish no host ports. The edge publishes HTTP and HTTPS only.
+name: youtube-prod
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  seaweed_data:
+  work_data:
+  caddy_data:
+  caddy_config:
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 20s
+    restart: unless-stopped
+    networks: [app]
+
+  redis:
+    image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 10s
+    restart: unless-stopped
+    networks: [app]
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    entrypoint: ["/bin/sh", "/opt/platform/write-identity.sh"]
+    command:
+      - server
+      - -ip=127.0.0.1
+      - -ip.bind=127.0.0.1
+      - -master.telemetry=false
+      - -filer
+      - -filer.disableHttp=true
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -s3.iam=false
+      - -s3.autoCreateBucket=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
+      - -s3.ip.bind=0.0.0.0
+      - -s3.allowedOrigins=${PUBLIC_APP_URL}
+      - -s3.externalUrl=${S3_PUBLIC_ENDPOINT_URL}
+    env_file:
+      - ${SEAWEED_ADMIN_FILE:-../.env.seaweed-admin}
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+    volumes:
+      - seaweed_data:/data
+      - ./seaweedfs/write-identity.sh:/opt/platform/write-identity.sh:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if command -v wget >/dev/null; then wget -q -O /dev/null http://127.0.0.1:9333/cluster/status; elif command -v curl >/dev/null; then curl -fsS http://127.0.0.1:9333/cluster/status >/dev/null; else exit 1; fi",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 20s
+    restart: unless-stopped
+    networks: [app]
+
+  s3-init:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: api-prod
+    entrypoint: ["python", "-m", "app.infrastructure.s3_init"]
+    env_file:
+      - ${SEAWEED_ADMIN_FILE:-../.env.seaweed-admin}
+    environment:
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+      S3_REGION: ${S3_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_BUCKET_QUOTA_BYTES: ${S3_BUCKET_QUOTA_BYTES}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL}
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+    networks: [app]
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: api-prod
+    env_file:
+      - ${APP_ENV_FILE:-../.env}
+    environment:
+      STORAGE_STARTUP_CHECK: "true"
+    volumes:
+      - work_data:/var/lib/media-work
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    stop_grace_period: 20s
+    restart: unless-stopped
+    networks: [app]
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: worker-prod
+    env_file:
+      - ${APP_ENV_FILE:-../.env}
+    environment:
+      STORAGE_STARTUP_CHECK: "false"
+    volumes:
+      - work_data:/var/lib/media-work
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,redis; redis.Redis.from_url(os.environ['REDIS_URL']).get('worker:heartbeat') or exit(1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    networks: [app]
+
+  edge:
+    build:
+      context: ..
+      dockerfile: deploy/caddy/Dockerfile
+    ports:
+      - "${EDGE_BIND:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${EDGE_BIND:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+    volumes:
+      - ${CADDYFILE:-./caddy/Caddyfile.prod}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    stop_grace_period: 15s
+    restart: unless-stopped
+    networks:
+      app:
+        aliases:
+          - s3.localhost

@@ -1,0 +1,29 @@
+# Production default for a local demo. ubuntu-up.sh replaces this file with
+# Caddyfile.runtime after it knows the public host. The image copy is the fallback.
+{
+	auto_https off
+	admin off
+}
+
+http://localhost, http://127.0.0.1 {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Cache-Control "no-cache"
+	}
+	@hashed path /assets/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@api path /api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json
+	handle @api {
+		reverse_proxy api:8000
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

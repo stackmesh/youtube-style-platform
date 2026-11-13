@@ -23,7 +23,7 @@ from app.api.videos import router as videos_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError, error_payload
 from app.core.logging import configure_logging, request_id_var
-from app.core.middleware import BodyLimitMiddleware, RequestIdMiddleware
+from app.core.middleware import BodyLimitMiddleware, RequestIdMiddleware, TrustedHostMiddleware
 from app.infrastructure.storage import assert_private_bucket
 
 logger = logging.getLogger(__name__)
@@ -54,11 +54,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     configure_logging()
     settings = get_settings()
+    docs_url = "/docs" if settings.docs_enabled else None
+    redoc_url = "/redoc" if settings.docs_enabled else None
+    openapi_url = "/openapi.json" if settings.docs_enabled else None
     app = FastAPI(
         title="Video platform",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
+    app.add_middleware(TrustedHostMiddleware)
     app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,

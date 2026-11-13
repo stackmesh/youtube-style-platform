@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 !.env.seaweed-admin.example
+deploy/caddy/Caddyfile.runtime
 
 __pycache__/
 *.py[cod]

@@ -1,6 +1,8 @@
 # Playback
 
-Stage 1 foundation for a YouTube-like video platform. The stack starts, checks its dependencies, and serves an application shell. Accounts, uploads, playback, comments, and moderation are later stages.
+YouTube-like video platform. Local development uses `compose.yaml`. A production host uses `bash deploy/ubuntu-up.sh`, documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+Accounts, uploads, HLS playback, comments, playlists, and moderation are implemented. A clean Ubuntu acceptance run is still required before treating a host as production.
 
 ## Technology stack
 
