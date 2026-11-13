@@ -8,7 +8,7 @@ import { useAuth } from "../auth/AuthContext";
 
 export function WatchPage() {
   const { videoId = "" } = useParams();
-  const { ready } = useAuth();
+  const { ready, user } = useAuth();
   const [video, setVideo] = useState<VideoSummary | null>(null);
   const [related, setRelated] = useState<VideoSummary[]>([]);
   const [error, setError] = useState("");
@@ -64,7 +64,7 @@ export function WatchPage() {
             <p className="mt-2 text-sm text-muted">Status: {video.processing_status}</p>
           </div>
         ) : (
-          <VideoPlayer videoId={video.id} />
+          <VideoPlayer videoId={video.id} viewerId={user?.id ?? null} />
         )}
         <h1 className="mt-4 text-2xl font-semibold">{video.title}</h1>
         <p className="mt-1 text-sm text-muted">

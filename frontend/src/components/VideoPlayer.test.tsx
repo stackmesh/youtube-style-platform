@@ -1,6 +1,12 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VideoPlayer } from "./VideoPlayer";
+
+const hlsBehavior = {
+  fatal: false,
+  levels: [] as { height: number }[],
+  currentLevel: -1,
+};
 
 vi.mock("hls.js", () => {
   class FakeHls {
@@ -13,9 +19,21 @@ vi.mock("hls.js", () => {
     loadSource = vi.fn();
     attachMedia = vi.fn();
     destroy = vi.fn();
-    on = vi.fn((event: string, handler: () => void) => {
+    get levels() {
+      return hlsBehavior.levels;
+    }
+    get currentLevel() {
+      return hlsBehavior.currentLevel;
+    }
+    set currentLevel(value: number) {
+      hlsBehavior.currentLevel = value;
+    }
+    on = vi.fn((event: string, handler: (event: string, data?: { fatal?: boolean }) => void) => {
       if (event === "parsed") {
-        handler();
+        handler(event);
+      }
+      if (event === "error" && hlsBehavior.fatal) {
+        handler(event, { fatal: true });
       }
     });
   }
@@ -24,6 +42,9 @@ vi.mock("hls.js", () => {
 
 afterEach(() => {
   cleanup();
+  hlsBehavior.fatal = false;
+  hlsBehavior.levels = [];
+  hlsBehavior.currentLevel = -1;
   vi.restoreAllMocks();
 });
 
@@ -62,5 +83,40 @@ describe("VideoPlayer", () => {
     );
     render(<VideoPlayer videoId="video-2" />);
     expect(await screen.findByText("No media file is attached. Playback is not available.")).toBeTruthy();
+  });
+
+  it("shows a retry after a fatal player error", async () => {
+    hlsBehavior.fatal = true;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ expires_at: "2026-11-13T00:00:00+00:00" }),
+    );
+    render(<VideoPlayer videoId="video-3" />);
+    expect(await screen.findByRole("button", { name: "Retry playback" })).toBeTruthy();
+  });
+
+  it("lets the viewer pick a rendition when hls.js reports levels", async () => {
+    hlsBehavior.levels = [{ height: 360 }, { height: 720 }];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ expires_at: "2026-11-13T00:00:00+00:00" }),
+    );
+    render(<VideoPlayer videoId="video-4" />);
+    const quality = await screen.findByLabelText("Quality");
+    fireEvent.change(quality, { target: { value: "1" } });
+    expect(hlsBehavior.currentLevel).toBe(1);
+  });
+
+  it("ends the session when the signed-in viewer logs out", async () => {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+      return Response.json({ expires_at: "2026-11-13T00:00:00+00:00" });
+    });
+    const view = render(<VideoPlayer videoId="video-5" viewerId="person-1" />);
+    expect(await screen.findByText("0:00 / 0:00")).toBeTruthy();
+    calls.length = 0;
+    view.rerender(<VideoPlayer videoId="video-5" viewerId={null} />);
+    await waitFor(() => {
+      expect(calls.some((call) => call.startsWith("DELETE") && call.includes("/playback"))).toBe(true);
+    });
   });
 });

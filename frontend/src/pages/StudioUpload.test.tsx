@@ -202,4 +202,65 @@ describe("studio upload", () => {
     });
     releaseCreate(Response.json({ id: "created", title: "Clip", processing_status: "draft" }));
   });
+
+  it("queues another processing attempt when the video failed", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/auth/refresh")) {
+        return Response.json(session);
+      }
+      if (url.includes("/me/videos") || url.includes("/grants")) {
+        return Response.json({ items: [], next_cursor: null });
+      }
+      if (url.endsWith("/api/v1/videos/created/processing/retry") && init?.method === "POST") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith("/api/v1/videos/created/processing")) {
+        return Response.json({
+          processing_status: "failed",
+          attempt: 1,
+          error_code: "invalid_media",
+          duration_seconds: null,
+          width: null,
+          height: null,
+          auto_thumbnail_ready: false,
+        });
+      }
+      if (url.includes("/videos/created")) {
+        return Response.json({
+          id: "created",
+          title: "Clip",
+          description: "",
+          tags: [],
+          visibility: "private",
+          processing_status: "failed",
+          channel: { handle: "person", name: "Person" },
+          view_count: 0,
+        });
+      }
+      return Response.json({ items: [], next_cursor: null });
+    });
+    render(
+      <MemoryRouter initialEntries={["/studio/created"]}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/studio" element={<StudioPage />} />
+            <Route path="/studio/:videoId" element={<StudioPage />} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Retry processing" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          (call) =>
+            String(call[0]).endsWith("/processing/retry") &&
+            (call[1] as RequestInit | undefined)?.method === "POST",
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByText("Processing queued again.")).toBeTruthy();
+  });
 });

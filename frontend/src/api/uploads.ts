@@ -90,6 +90,10 @@ export function getProcessing(videoId: string): Promise<ProcessingStatus> {
   return apiRequest<ProcessingStatus>(`/api/v1/videos/${videoId}/processing`, {}, true);
 }
 
+export function retryProcessing(videoId: string): Promise<void> {
+  return apiRequest<void>(`/api/v1/videos/${videoId}/processing/retry`, { method: "POST" }, true);
+}
+
 export type PutPart = (
   url: string,
   body: Blob,

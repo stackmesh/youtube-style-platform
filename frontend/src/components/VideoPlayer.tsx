@@ -13,14 +13,32 @@ function clock(seconds: number): string {
   return `${minutes}:${remain.toString().padStart(2, "0")}`;
 }
 
-export function VideoPlayer({ videoId }: { videoId: string }) {
+export function VideoPlayer({
+  videoId,
+  viewerId = null,
+}: {
+  videoId: string;
+  viewerId?: string | null;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const started = useRef(false);
+  const previousViewer = useRef<string | null | undefined>(undefined);
   const [phase, setPhase] = useState<Phase>("loading");
   const [attempt, setAttempt] = useState(0);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [completed, setCompleted] = useState(false);
+  const [levels, setLevels] = useState<number[]>([]);
+  const [quality, setQuality] = useState(-1);
+
+  useEffect(() => {
+    const previous = previousViewer.current;
+    previousViewer.current = viewerId;
+    if (previous && !viewerId) {
+      setAttempt((value) => value + 1);
+    }
+  }, [viewerId]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -32,6 +50,8 @@ export function VideoPlayer({ videoId }: { videoId: string }) {
     started.current = false;
     setPhase("loading");
     setCompleted(false);
+    setLevels([]);
+    setQuality(-1);
 
     const onTime = () => {
       setCurrent(video.currentTime);
@@ -63,12 +83,15 @@ export function VideoPlayer({ videoId }: { videoId: string }) {
               xhr.withCredentials = true;
             },
           });
+          hlsRef.current = player;
           player.loadSource(playlist);
           player.attachMedia(video);
           player.on(Hls.Events.MANIFEST_PARSED, () => {
-            if (!cancelled) {
-              setPhase((current) => (current === "error" ? current : "ready"));
+            if (cancelled) {
+              return;
             }
+            setLevels(player?.levels.map((level) => level.height) ?? []);
+            setPhase((currentPhase) => (currentPhase === "error" ? currentPhase : "ready"));
           });
           player.on(Hls.Events.ERROR, (_event, data) => {
             if (!cancelled && data.fatal) {
@@ -102,10 +125,20 @@ export function VideoPlayer({ videoId }: { videoId: string }) {
       video.removeEventListener("ended", onEnded);
       video.removeEventListener("error", onMediaError);
       player?.destroy();
+      if (hlsRef.current === player) {
+        hlsRef.current = null;
+      }
       video.removeAttribute("src");
       void endPlayback(videoId).catch(() => undefined);
     };
   }, [videoId, attempt]);
+
+  function chooseQuality(next: number) {
+    setQuality(next);
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = next;
+    }
+  }
 
   if (phase === "unavailable") {
     return <MediaPlaceholder />;
@@ -126,6 +159,24 @@ export function VideoPlayer({ videoId }: { videoId: string }) {
           {completed ? " · completed" : ""}
         </span>
         {phase === "loading" ? <span>Loading playback.</span> : null}
+        {levels.length > 0 ? (
+          <label className="flex items-center gap-2">
+            Quality
+            <select
+              aria-label="Quality"
+              value={String(quality)}
+              onChange={(event) => chooseQuality(Number(event.target.value))}
+              className="rounded bg-zinc-900 px-2 py-1"
+            >
+              <option value="-1">Auto</option>
+              {levels.map((height, index) => (
+                <option key={`${height}-${index}`} value={String(index)}>
+                  {height}p
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         {phase === "error" ? (
           <button type="button" className="underline" onClick={() => setAttempt((value) => value + 1)}>
             Retry playback

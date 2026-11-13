@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
-import { getProcessing, uploadVideoFile, validateVideoFile } from "../api/uploads";
+import { getProcessing, retryProcessing, uploadVideoFile, validateVideoFile } from "../api/uploads";
 import {
   createVideo,
   deleteVideo,
@@ -36,6 +36,7 @@ export function StudioPage() {
   const [fileError, setFileError] = useState("");
   const [progress, setProgress] = useState<number | null>(null);
   const [processing, setProcessing] = useState("");
+  const [watchGeneration, setWatchGeneration] = useState(0);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -67,7 +68,7 @@ export function StudioPage() {
           const waiting =
             status.processing_status === "processing" ||
             status.processing_status === "uploading" ||
-            (status.processing_status === "uploaded" && !status.auto_thumbnail_ready);
+            status.processing_status === "uploaded";
           if (waiting) {
             timer = window.setTimeout(watch, 3000);
           }
@@ -79,7 +80,7 @@ export function StudioPage() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [ready, user, videoId]);
+  }, [ready, user, videoId, watchGeneration]);
 
   useEffect(() => {
     if (!ready || !user) {
@@ -224,6 +225,26 @@ export function StudioPage() {
     }
   }
 
+  async function onRetry() {
+    if (!videoId || busyRef.current) {
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await retryProcessing(videoId);
+      setProcessing("uploaded");
+      setWatchGeneration((value) => value + 1);
+      setMessage("Processing queued again.");
+    } catch (caught: unknown) {
+      setError(caught instanceof ApiError ? caught.message : "Could not retry processing.");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[280px_minmax(0,1fr)]">
       <div>
@@ -314,6 +335,16 @@ export function StudioPage() {
           </p>
         ) : null}
         {processing ? <p className="text-sm text-muted">Processing status: {processing}</p> : null}
+        {videoId && processing === "failed" ? (
+          <button
+            type="button"
+            disabled={busy}
+            className="rounded-full border border-line px-4 py-2 text-sm disabled:opacity-60"
+            onClick={() => void onRetry()}
+          >
+            Retry processing
+          </button>
+        ) : null}
         <p className="text-sm text-muted">
           Public, unlisted, and private apply after the video is ready. A draft is not in the feed.
           The player stays hidden until processing can publish the video.
