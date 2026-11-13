@@ -41,7 +41,7 @@ Critical rows, deduplicated by vulnerability and package:
 | --- | --- | --- | --- |
 | PostgreSQL | `16-alpine@sha256:aa6cb33cf4c1…` | `16.16-alpine@sha256:0adbf25a9e96…` | Same major version. High findings fell from 44 to 25. Nineteen high rows in `krb5-libs` and `libxslt` are gone. `postgres --version` reports 16.16. |
 | Caddy and edge | `2.8-alpine@sha256:af32e97399fe…` | `2.11.9-alpine@sha256:003a97808e78…` | `caddy validate` accepted `deploy/caddy/Caddyfile.prod`. Critical findings fell from 7 to 0 and high findings from 92 to 2. |
-| Redis | `7-alpine@sha256:7b1753b4c5ad…` | unchanged | Current `redis:7-alpine` is Redis 7.4.12 (`sha256:7f7d30b7fdd0…`) and still has the same medium finding. |
+| Redis | `7-alpine@sha256:7b1753b4c5ad…` | same server, `zlib` `1.4-r0` | The pinned image is already Redis 7.4.12. Alpine 3.22 publishes `zlib` `1.4-r0`, so `deploy/redis/Dockerfile` upgrades that package only. |
 | SeaweedFS 4.53 | unchanged | unchanged | GitHub releases on 2026-11-13 still list 4.53, published 2026-11-08, as the newest release. |
 | API and worker base | unchanged | unchanged | Bookworm has no newer candidate for the critical libraries. FFmpeg stays. |
 
@@ -49,7 +49,7 @@ PostgreSQL 16.16 scan of digest `sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c
 
 Caddy 2.11.9 scan of digest `sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0`: 0 critical, 2 high, 4 medium, 0 low, 2 unknown. The two high rows were already present in Caddy 2.8 at older versions: CVE-2026-116587 in `go-jose` moved from `v3.0.3` to `v3.0.5` and still has no fixed version, and CVE-2026-78661 in `golang.org/x/net` moved from `v0.25.0` to `v0.60.0` while the fix remains `0.62.0`. The OpenSSL critical CVE-2026-31789 and the zlib high CVE-2026-22184 are gone. Medium CVE-2026-4738 remains in `zlib` `1.3.2-r1`. Docker Hub on 2026-11-13 shows `2.11.9-alpine`, `2.11-alpine`, `2-alpine`, and `alpine` sharing that digest.
 
-Redis comparison scan of digest `sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe`: 1 medium, CVE-2026-4738, `zlib` `1.3.2-r1`, fixed version `1.4-r0`. That is the same finding as the pinned image. The pin stays on the previous digest.
+The newer `redis:7-alpine` digest `sha256:7f7d30b7fdd0…` is also Redis 7.4.12 and still contains `zlib` `1.3.2-r1`. `apk policy` inside the pinned image shows the fixed package `1.4-r0` in Alpine 3.22. The derived image installs that package and leaves the Redis server at 7.4.12.
 
 ## Frontend
 
@@ -82,8 +82,24 @@ The same Trivy 0.58.2 database was used after `image --download-db-only`. Trivy 
 | `caddy:2.11.9-alpine` | `sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0` | 0 | 2 | 4 | 0 | 2 |
 | SeaweedFS 4.53 | `sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0` | 0 | 1 | 1 | 0 | 2 |
 
-The edge image and the Caddy 2.11.9 base report the same counts. API and worker run as uid 10001. The edge image runs as root, which is also what `caddy:2.8-alpine` does. The production stack was not started.
+The edge image and the Caddy 2.11.9 base report the same counts in that table. The edge image now runs as uid 10001. The Redis row is the base image before `deploy/redis/Dockerfile` installed `zlib` `1.4-r0`. The derived image scan reported no vulnerabilities.
+
+## Runtime verification
+
+The backup at `tmp/acceptance-backups/20261113T071313Z` is mode `700`. `db.dump` is mode `600`, 58277 bytes, and `pg_restore -l` from PostgreSQL 16.16 reads it. The archive was dumped from PostgreSQL 16.15 and contains 2 users and Alembic revision `0007_indexes`. The volume `youtube-prod_pg_data` is mounted at `/var/lib/postgresql/data` and its `PG_VERSION` is `16`.
+
+PostgreSQL 16.16 started on that volume. The log says `database system is ready to accept connections` and contains no fatal or incompatibility error. `pg_isready` accepts connections. The `youtube` role is present. The user count is 2 and `alembic_version` is `0007_indexes`.
+
+The edge process is uid 10001. It listens on container ports 8080 and 8443. The existing Caddy volumes were given to uid 10001 without deleting files, and that user can write `/data/caddy` and `/config/caddy`.
+
+`deploy/redis/Dockerfile` keeps Redis 7.4.12 and installs `zlib` `1.4-r0`. A Trivy 0.58.2 scan of `youtube-prod-redis:7.4.12` reported no vulnerabilities. The Redis server process runs as uid 999.
+
+These findings still need a newer upstream release:
+
+- Caddy 2.11.9 remains the current Alpine tag and still vendors `golang.org/x/net` `v0.60.0` (CVE-2026-78661, fixed in 0.62.0).
+- SeaweedFS 4.53, published 2026-11-08, remains the newest release. `weed` still contains `golang.org/x/net` `v0.61.0`.
+- PostgreSQL 16.16 is the newest 16 image checked. `/usr/local/bin/gosu` is 1.19, built with Go 1.24.6, so CVE-2025-68121 remains.
 
 ## Volumes
 
-No Docker volume was deleted, recreated, pruned, or reset. The production stack was not started, so the existing PostgreSQL data directory was not opened by 16.16.
+No Docker volume was deleted, recreated, pruned, or reset. PostgreSQL 16.16 was started only after the backup listed above was readable. The volume `youtube-prod_pg_data` still records its original creation time, `2026-11-13T16:56:38+10:00`.

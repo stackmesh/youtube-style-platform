@@ -143,6 +143,8 @@ render_caddy() {
 {
 	auto_https off
 	admin off
+	http_port 8080
+	https_port 8443
 }
 http://127.0.0.1, http://localhost {
 	encode gzip
@@ -178,6 +180,8 @@ EOF
 {
 	email ${ACME_EMAIL}
 	admin off
+	http_port 8080
+	https_port 8443
 }
 ${domain} {
 	encode gzip
@@ -210,6 +214,20 @@ s3.${domain} {
 EOF
   fi
   chmod 644 "$dest"
+}
+
+chown_caddy_volumes() {
+  local volume
+  for volume in youtube-prod_caddy_data youtube-prod_caddy_config; do
+    if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  docker run --rm --user 0 --entrypoint chown \
+    -v youtube-prod_caddy_data:/data \
+    -v youtube-prod_caddy_config:/config \
+    caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 \
+    -R 10001:10001 /data /config
 }
 
 ensure_docker() {
@@ -360,6 +378,7 @@ main() {
   export HTTP_PORT="${HTTP_PORT:-80}"
   export HTTPS_PORT="${HTTPS_PORT:-443}"
   export EDGE_BIND="${EDGE_BIND:-0.0.0.0}"
+  chown_caddy_volumes
   check_admin_keys_absent
   configure_firewall
   compose_prod "$ROOT" up -d --build --remove-orphans

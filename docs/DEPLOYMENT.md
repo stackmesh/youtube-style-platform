@@ -44,13 +44,13 @@ The installer does not change UFW unless `DEPLOY_CONFIGURE_UFW=1`. With that fla
 | Image | Pin |
 | --- | --- |
 | PostgreSQL | `postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106` |
-| Redis | `redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7` |
+| Redis | `redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7` plus `apk upgrade zlib` in `deploy/redis/Dockerfile` |
 | SeaweedFS | `chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0` |
 | Caddy | `caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0` |
 | API and worker base | `python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df` |
 | Frontend build | `node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a` |
 
-The API and worker images run as uid 10001. The worker image adds FFmpeg. The edge image contains the Vite production build and does not run the dev server.
+The API, worker, and edge images run as uid 10001. The worker image adds FFmpeg. The edge image contains the Vite production build and does not run the dev server. Caddy listens on container ports 8080 and 8443, and Compose publishes the host HTTP and HTTPS ports to those ports. Certificate data stays in the `caddy_data` and `caddy_config` volumes. An existing volume created by the root Caddy image is given to uid 10001 before the edge starts. The files are not deleted.
 
 ## Image scan exception
 
@@ -60,6 +60,6 @@ These findings remain because the current upstream image has no patched package:
 
 - API and worker: Debian Bookworm `zlib1g` `1:1.2.13.dfsg-1` (CVE-2023-45853) and `libsqlite3-0` `3.40.1-2+deb12u2` (CVE-2025-7458). Bookworm security has no newer candidate. The API uses PostgreSQL. SQLite is present because the Python base image ships it. The worker keeps FFmpeg, so `libaom3`, `libmbedcrypto7`, `libglib2.0-0`, and `libxml2` stay where Bookworm has no fixed version.
 - PostgreSQL 16.16: CVE-2025-68121 remains in `/usr/local/bin/gosu`, built with Go 1.24.6. The fixed Go releases are 1.24.13, 1.25.7, and 1.26.0-rc.3. `gosu` runs when the container starts.
-- Redis: the pinned image and the newer `redis:7-alpine` digest both have medium CVE-2026-4738 in `zlib` `1.3.2-r1`. The newer tag is Redis 7.4.12 and does not remove that finding, so the pin stays.
+- Redis 7.4.12 stays on the pinned base. `deploy/redis/Dockerfile` installs Alpine `zlib` `1.4-r0`, which is the fixed version for CVE-2026-4738. The Redis server binary is unchanged.
 - Caddy 2.11.9: high CVE-2026-116587 in `github.com/go-jose/go-jose/v3` `v3.0.5` has no fixed version. High CVE-2026-78661 in `golang.org/x/net` `v0.60.0` is fixed in 0.62.0, and this Caddy release still vendors 0.60.0. `2.11.9-alpine` is the current Alpine tag.
 - SeaweedFS 4.53, published 2026-11-08, is the newest release. `weed` includes `golang.org/x/net` `v0.61.0` (CVE-2026-78661), fixed in 0.62.0.

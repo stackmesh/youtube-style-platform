@@ -13,4 +13,10 @@ FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20f
 COPY --from=assets /src/dist /srv
 COPY deploy/caddy/Caddyfile.prod /etc/caddy/Caddyfile
 
-EXPOSE 80 443
+RUN addgroup -g 10001 -S caddy \
+ && adduser -u 10001 -S -D -H -G caddy caddy \
+ && chown -R caddy:caddy /srv /data /config /etc/caddy
+
+USER caddy
+
+EXPOSE 8080 8443

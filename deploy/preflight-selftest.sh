@@ -175,6 +175,8 @@ PY
   if grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
     exit 1
   fi
+  grep -q 'http_port 8080' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  grep -q 'https_port 8443' "$ROOT/deploy/caddy/Caddyfile.runtime"
   python3 - "$ROOT/.env" <<'PY'
 from pathlib import Path
 import sys
@@ -226,6 +228,8 @@ PY
   render_caddy
   caddy_text="$(cat "$ROOT/deploy/caddy/Caddyfile.runtime")"
   grep -q 'Strict-Transport-Security' <<<"$caddy_text"
+  grep -q 'http_port 8080' <<<"$caddy_text"
+  grep -q 'https_port 8443' <<<"$caddy_text"
   if grep -q "unsafe-inline" <<<"$caddy_text"; then
     exit 1
   fi
