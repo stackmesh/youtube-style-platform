@@ -29,7 +29,7 @@ Run it again after pulling a new revision. An existing `.env` and `.env.seaweed-
 
 Generated files are mode `600`. `JWT_SECRET`, the database password, the media key, and the storage-admin key are random. `S3_ADMIN_ACCESS_KEY` and `S3_ADMIN_SECRET_KEY` are only in `.env.seaweed-admin`. The API process exits if it sees them.
 
-`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. A new install writes `DOCS_ENABLED=false`, and Caddy does not route `/docs`.
+`CORS_ORIGINS` equals `PUBLIC_APP_URL`. TLS mode requires `COOKIE_SECURE=true`, `PUBLIC_APP_URL=https://<domain>`, and `S3_PUBLIC_ENDPOINT_URL=https://s3.<domain>`. `TRUSTED_HOSTS` lists the site host and the `s3` host. A new install writes `DOCS_ENABLED=false`. Caddy answers `/docs`, `/redoc`, and `/openapi.json` with HTTP 404, so the frontend fallback does not serve those paths.
 
 An existing `.env` with `DOCS_ENABLED=true` makes the installer stop before it changes secrets or starts containers. The message is `deploy: FAIL docs`. To open Swagger for a maintenance window, set `DOCS_ENABLED=true` and run `DOCS_OPT_IN=1 bash deploy/ubuntu-up.sh`. When maintenance is finished, set `DOCS_ENABLED=false` and run the installer again. `DOCS_OPT_IN` is not written into `.env`.
 

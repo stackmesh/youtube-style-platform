@@ -172,7 +172,9 @@ PY
   mode="$(stat -c '%a' "$ROOT/.env")"
   [[ "$mode" == "600" ]]
   render_caddy
-  if grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
+  grep -q 'respond "Not found" 404' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  grep -q '@api path /api/\* /health/\*' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  if grep -q '@api path /api/\* /health/\* /docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
     exit 1
   fi
   grep -q 'http_port 8080' "$ROOT/deploy/caddy/Caddyfile.runtime"
@@ -186,13 +188,18 @@ PY
   opted_sum="$(sha256sum "$ROOT/.env" | awk '{print $1}')"
   DOCS_OPT_IN=""
   render_caddy
-  if grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
+  grep -q 'respond "Not found" 404' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  if grep -q '@api path /api/\* /health/\* /docs' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
     exit 1
   fi
   [[ "$(sha256sum "$ROOT/.env" | awk '{print $1}')" == "$opted_sum" ]]
   DOCS_OPT_IN=1
   render_caddy
-  grep -q '/docs' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  grep -q '@docs path /docs /docs/\* /redoc /redoc/\* /openapi.json' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  grep -q 'reverse_proxy api:8000' "$ROOT/deploy/caddy/Caddyfile.runtime"
+  if grep -q 'respond "Not found" 404' "$ROOT/deploy/caddy/Caddyfile.runtime"; then
+    exit 1
+  fi
   [[ "$(sha256sum "$ROOT/.env" | awk '{print $1}')" == "$opted_sum" ]]
 )
 rm -rf "$install"
@@ -236,7 +243,8 @@ PY
   if grep -q "unsafe-eval" <<<"$caddy_text"; then
     exit 1
   fi
-  if grep -q '/docs' <<<"$caddy_text"; then
+  grep -q 'respond "Not found" 404' <<<"$caddy_text"
+  if grep -q '@api path /api/\* /health/\* /docs' <<<"$caddy_text"; then
     exit 1
   fi
 )

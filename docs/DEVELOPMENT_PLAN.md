@@ -62,7 +62,7 @@ Tests are part of each stage's definition of done. A stage that adds a behavior 
 
 Database for integration tests is PostgreSQL, not SQLite. The queries use PostgreSQL features (`SKIP LOCKED`, partial indexes, `tsvector`, `citext`).
 
-CI, when a git remote exists, runs unit tests, integration tests, and the migration test on every change. The Playwright suite and the FFmpeg suite run on the same pipeline on main, and locally via `docker compose -f compose.test.yml run tests`. Until a remote exists, that Compose command is the verification path. CI configuration is delivered in stage 11, not before the tests exist.
+CI, when a git remote exists, runs unit tests, integration tests, and the migration test on every change. Browser acceptance lives in `frontend/e2e` and runs with `npm test` in that directory against an isolated production Compose project. `npm test` in `frontend` stays the unit suite and does not start that stack. `compose.test.yml` is not used: a shared Compose test service would put browser fixtures on the development database.
 
 Frontend tests do not require the full backend. End-to-end tests do.
 

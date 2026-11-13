@@ -21,6 +21,9 @@ htmlcov/
 node_modules/
 dist/
 *.tsbuildinfo
+frontend/e2e/test-results/
+frontend/e2e/playwright-report/
+frontend/e2e/evidence/
 
 tmp/
 scratch/

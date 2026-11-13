@@ -14,11 +14,15 @@ http://localhost, http://127.0.0.1 {
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		Cache-Control "no-cache"
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@docs path /docs /docs/* /redoc /redoc/* /openapi.json
+	handle @docs {
+		respond "Not found" 404
+	}
 	@api path /api/* /health/*
 	handle @api {
 		reverse_proxy api:8000

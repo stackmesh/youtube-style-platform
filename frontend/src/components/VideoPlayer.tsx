@@ -1,6 +1,6 @@
 import Hls from "hls.js";
 import { useEffect, useRef, useState } from "react";
-import { ApiError } from "../api/client";
+import { ApiError, getAccessToken } from "../api/client";
 import { createPlayback, endPlayback, recordView } from "../api/playback";
 import { MediaPlaceholder } from "./VideoCard";
 
@@ -81,6 +81,10 @@ export function VideoPlayer({
           player = new Hls({
             xhrSetup: (xhr) => {
               xhr.withCredentials = true;
+              const token = getAccessToken();
+              if (token) {
+                xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+              }
             },
           });
           hlsRef.current = player;

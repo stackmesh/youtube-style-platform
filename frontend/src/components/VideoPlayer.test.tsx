@@ -1,11 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setAccessToken } from "../api/client";
 import { VideoPlayer } from "./VideoPlayer";
 
 const hlsBehavior = {
   fatal: false,
   levels: [] as { height: number }[],
   currentLevel: -1,
+  config: null as { xhrSetup?: (xhr: XMLHttpRequest) => void } | null,
 };
 
 vi.mock("hls.js", () => {
@@ -15,6 +17,10 @@ vi.mock("hls.js", () => {
     }
 
     static Events = { MANIFEST_PARSED: "parsed", ERROR: "error" };
+
+    constructor(config?: { xhrSetup?: (xhr: XMLHttpRequest) => void }) {
+      hlsBehavior.config = config ?? null;
+    }
 
     loadSource = vi.fn();
     attachMedia = vi.fn();
@@ -45,6 +51,8 @@ afterEach(() => {
   hlsBehavior.fatal = false;
   hlsBehavior.levels = [];
   hlsBehavior.currentLevel = -1;
+  hlsBehavior.config = null;
+  setAccessToken(null);
   vi.restoreAllMocks();
 });
 
@@ -65,6 +73,23 @@ describe("VideoPlayer", () => {
     expect(calls.some((call) => call.startsWith("POST") && call.includes("/playback"))).toBe(true);
     expect(calls.some((call) => call.startsWith("DELETE") && call.includes("/playback"))).toBe(true);
     expect(calls.some((call) => call.includes("/views"))).toBe(false);
+  });
+
+  it("sends the bearer token on playlist requests", async () => {
+    setAccessToken("memory-token");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ expires_at: "2026-11-13T00:00:00+00:00" }));
+    render(<VideoPlayer videoId="video-1" />);
+    expect(await screen.findByText("0:00 / 0:00")).toBeTruthy();
+    const headers = new Map<string, string>();
+    const xhr = {
+      withCredentials: false,
+      setRequestHeader(name: string, value: string) {
+        headers.set(name, value);
+      },
+    } as XMLHttpRequest;
+    hlsBehavior.config?.xhrSetup?.(xhr);
+    expect(xhr.withCredentials).toBe(true);
+    expect(headers.get("Authorization")).toBe("Bearer memory-token");
   });
 
   it("shows the placeholder when the video is not ready", async () => {

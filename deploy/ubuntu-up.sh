@@ -131,11 +131,12 @@ render_caddy() {
   fi
   local docs_enabled="false"
   local api_paths="/api/* /health/*"
+  local docs_action='respond "Not found" 404'
   if [[ -f "$ROOT/.env" ]]; then
     docs_enabled="$(awk -F= '$1=="DOCS_ENABLED" {print substr($0, index($0, "=")+1)}' "$ROOT/.env")"
   fi
   if [[ "$docs_enabled" == "true" && "${DOCS_OPT_IN:-}" == "1" ]]; then
-    api_paths="/api/* /health/* /docs /docs/* /redoc /redoc/* /openapi.json"
+    docs_action="reverse_proxy api:8000"
   fi
   umask 077
   if [[ "${DEMO_HTTP:-}" == "1" ]]; then
@@ -153,11 +154,15 @@ http://127.0.0.1, http://localhost {
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ${s3_origin}; media-src 'self' ${s3_origin}; connect-src 'self' ${s3_origin}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: ${s3_origin}; media-src 'self' blob: ${s3_origin}; connect-src 'self' ${s3_origin}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		Cache-Control "no-cache"
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@docs path /docs /docs/* /redoc /redoc/* /openapi.json
+	handle @docs {
+		${docs_action}
+	}
 	@api path ${api_paths}
 	handle @api {
 		reverse_proxy api:8000
@@ -191,11 +196,15 @@ ${domain} {
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://s3.${domain}; media-src 'self' https://s3.${domain}; connect-src 'self' https://s3.${domain}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://s3.${domain}; media-src 'self' blob: https://s3.${domain}; connect-src 'self' https://s3.${domain}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		Cache-Control "no-cache"
 	}
 	@hashed path /assets/*
 	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	@docs path /docs /docs/* /redoc /redoc/* /openapi.json
+	handle @docs {
+		${docs_action}
+	}
 	@api path ${api_paths}
 	handle @api {
 		reverse_proxy api:8000
@@ -410,7 +419,7 @@ main() {
     printf 'Swagger: %s/docs\n' "$public_url"
     printf 'deploy: WARN /docs is public for this run. Set DOCS_ENABLED=false and run the installer again when maintenance is finished.\n'
   else
-    printf 'deploy: /docs is not routed.\n'
+    printf 'deploy: /docs returns 404.\n'
   fi
 }
 

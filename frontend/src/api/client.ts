@@ -54,7 +54,14 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, authen
   if (response.status === 204) {
     return undefined as T;
   }
-  const payload = (await response.json()) as T | ApiErrorBody;
+  const raw = await response.text();
+  if (!raw) {
+    if (!response.ok) {
+      throw new Error("The request failed.");
+    }
+    return undefined as T;
+  }
+  const payload = JSON.parse(raw) as T | ApiErrorBody;
   if (!response.ok) {
     throw new ApiError(response.status, payload as ApiErrorBody);
   }
